@@ -15,6 +15,7 @@
 - The sidebar panel status card now shows three lines: user and IP / workspace → virtual drive / authentication
 - Removed rclone updates: once installed, rclone is not downloaded again, and the panel no longer shows an update link
 - The extension Details and Changelog documents are now in English by default, with separate Korean documents (`README.ko.md`, `CHANGELOG.ko.md`)
+- Marketplace metadata: GPL-3.0-or-later license, icon, and GitHub repository (github.com/PlanXLab/tOS-Remote)
 
 ## 0.1.2
 

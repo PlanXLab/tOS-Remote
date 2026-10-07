@@ -15,6 +15,7 @@
 - 사이드바 패널 상태 카드를 3줄로 표시: 계정·IP / 작업 공간 → 가상 드라이브 / 인증
 - rclone 업데이트 기능 제거: 한 번 설치하면 다시 내려받지 않으며, 패널에 업데이트 링크를 표시하지 않음
 - 확장 정보(Details/Changelog) 문서를 영어 기본으로 변경하고 한국어 문서(`README.ko.md`, `CHANGELOG.ko.md`)를 분리
+- Marketplace 정보 추가: GPL-3.0-or-later 라이선스, 아이콘, GitHub 저장소(github.com/PlanXLab/tOS-Remote)
 
 ## 0.1.2
 

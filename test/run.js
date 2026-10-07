@@ -224,6 +224,17 @@ test('docs: README.md·CHANGELOG.md는 영어(한국어는 *.ko.md)', () => {
     }
 });
 
+test('marketplace: 라이선스·저장소·PNG 아이콘', () => {
+    const manifest = readJson('package.json');
+    assert.strictEqual(manifest.license, 'GPL-3.0-or-later');
+    assert.strictEqual(manifest.repository.url, 'https://github.com/PlanXLab/tOS-Remote.git');
+    assert.ok(fs.readFileSync(path.join(ROOT, 'LICENSE'), 'utf8').includes('GNU GENERAL PUBLIC LICENSE'));
+    assert.ok(/\.png$/i.test(manifest.icon), 'Marketplace icon must be PNG');
+    const png = fs.readFileSync(path.join(ROOT, manifest.icon));
+    assert.strictEqual(png.subarray(1, 4).toString('ascii'), 'PNG');
+    assert.ok(png.readUInt32BE(16) >= 128 && png.readUInt32BE(20) >= 128, 'icon must be at least 128x128');
+});
+
 let failed = 0;
 for (const { name, fn } of tests) {
     try {

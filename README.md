@@ -117,7 +117,8 @@ scripts/integration-test.ps1   Runs the integration tests
 ```powershell
 node test/run.js                       # Unit tests
 .\scripts\build-vsix.ps1               # Creates dist\tos-remote-<version>.vsix (no Node.js needed)
-npx @vscode/vsce package               # Standard packaging (Node.js needed)
+npx @vscode/vsce package --out dist/   # Marketplace packaging and validation (Node.js needed)
+npx @vscode/vsce publish               # Publish to the Marketplace (after vsce login PlanXLab)
 .\scripts\integration-test.ps1 -CodePath <Code.exe>
 ```
 
@@ -133,4 +134,6 @@ The integration tests cannot start while another VS Code instance with the same 
 
 ## License
 
-Before publishing, add a LICENSE file and the `license` and `repository` fields to `package.json`.
+[GPL-3.0-or-later](LICENSE). Copyright (C) PlanXLab.
+
+This extension does not bundle rclone or WinFsp. rclone (MIT) is downloaded from the official site on first use, and WinFsp (GPLv3 with FLOSS exception) is installed by the user with winget.

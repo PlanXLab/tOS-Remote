@@ -72,6 +72,13 @@ $manifest = @"
   </Assets>
 </PackageManifest>
 "@
+if ($package.icon) {
+    $manifest = $manifest.Replace('    <GalleryFlags>Public</GalleryFlags>', "    <GalleryFlags>Public</GalleryFlags>`n    <Icon>extension/$($package.icon)</Icon>")
+    $manifest = $manifest.Replace('  </Assets>', "    <Asset Type=`"Microsoft.VisualStudio.Services.Icons.Default`" Path=`"extension/$($package.icon)`" Addressable=`"true`" />`n  </Assets>")
+}
+if ($license) {
+    $manifest = $manifest.Replace('    <GalleryFlags>Public</GalleryFlags>', "    <GalleryFlags>Public</GalleryFlags>`n    <License>extension/$license</License>")
+}
 
 $contentTypes = '<?xml version="1.0" encoding="utf-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
     '<Default Extension=".json" ContentType="application/json"/>' +

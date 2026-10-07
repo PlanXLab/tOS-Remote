@@ -4,6 +4,20 @@
     "description": "%description%",
     "version": "0.2.0",
     "publisher": "PlanXLab",
+    "license": "GPL-3.0-or-later",
+    "icon": "media/icon.png",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/PlanXLab/tOS-Remote.git"
+    },
+    "homepage": "https://github.com/PlanXLab/tOS-Remote#readme",
+    "bugs": {
+        "url": "https://github.com/PlanXLab/tOS-Remote/issues"
+    },
+    "galleryBanner": {
+        "color": "#0B3D6E",
+        "theme": "dark"
+    },
     "engines": {
         "vscode": "^1.82.0"
     },
@@ -38,7 +52,8 @@
     },
     "scripts": {
         "test": "node test/run.js",
-        "package": "npx --yes @vscode/vsce package --out dist/ --skip-license --allow-missing-repository"
+        "package": "npx --yes @vscode/vsce package --out dist/",
+        "publish": "npx --yes @vscode/vsce publish"
     },
     "contributes": {
         "configuration": {

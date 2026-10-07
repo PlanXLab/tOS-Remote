@@ -117,7 +117,8 @@ scripts/integration-test.ps1   통합 테스트 실행
 ```powershell
 node test/run.js                       # 단위 테스트
 .\scripts\build-vsix.ps1               # dist\tos-remote-<버전>.vsix 생성 (Node 불필요)
-npx @vscode/vsce package               # 표준 패키징 (Node 필요)
+npx @vscode/vsce package --out dist/   # Marketplace용 패키징·검증 (Node 필요)
+npx @vscode/vsce publish               # Marketplace 게시 (vsce login PlanXLab 후)
 .\scripts\integration-test.ps1 -CodePath <Code.exe>
 ```
 
@@ -133,4 +134,6 @@ npx @vscode/vsce package               # 표준 패키징 (Node 필요)
 
 ## 라이선스
 
-공개 전에 LICENSE 파일과 `package.json`의 `license`, `repository` 필드를 추가해야 합니다.
+[GPL-3.0-or-later](LICENSE). Copyright (C) PlanXLab.
+
+이 확장은 rclone과 WinFsp를 포함하지 않습니다. rclone(MIT)은 처음 사용할 때 공식 사이트에서 내려받고, WinFsp(GPLv3, FLOSS 예외)는 사용자가 winget으로 설치합니다.
