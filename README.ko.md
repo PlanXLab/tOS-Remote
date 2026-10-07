@@ -1,0 +1,136 @@
+# tOS Remote
+
+[English](README.md) | **한국어**
+
+PC의 VS Code에서 tOS(tOS-Lite, Raspberry Pi 5) 보드의 작업 공간을 열고, 비전 추론 코드를 편집·실행·디버깅하는 VS Code 확장입니다.
+
+보드에 VS Code Server를 설치하지 않습니다. 보드에서 이미 실행 중인 Dropbear SSH(SFTP)만 사용하므로 보드 메모리를 추가로 점유하지 않습니다.
+
+## 주요 기능
+
+- **원격 작업 공간 열기/닫기**: 보드의 작업 폴더(기본 `/home/tos/Workspace`)를 Windows 드라이브로 연결하고 VS Code 창에서 엽니다.
+- **사이드바 패널**: 보드 주소·계정·경로 설정, 연결 테스트, SSH 키 등록, 준비 상태(WinFsp·rclone·OpenSSH), 도구 모음
+- **시작 가이드**: WinFsp 설치 → rclone 준비 → 보드 정보 → SSH 키 등록 → 작업 공간 열기를 단계별로 안내
+- **SSH 터미널**: 작업 공간의 기본 터미널이 보드의 셸로 열립니다.
+- **실행/디버깅** (원격 작업 공간 창에서 Python 파일 기준)
+
+  | 동작 | 방법 |
+  |---|---|
+  | tOS에서 디버깅 | `F5`, Run 버튼 메뉴의 **tOS에서 디버그** (영어: Debug on tOS) |
+  | tOS에서 바로 실행 (디버거 없음) | `Ctrl+F5`, 편집기 오른쪽 위 Run 버튼(**tOS에서 실행**, 영어: Run on tOS) |
+
+  - 실행 결과는 터미널 패널의 `tOS에서 실행: <파일>` 작업에 표시되며, 실행 전에 저장과 보드 업로드 완료를 기다립니다.
+  - Run 버튼 메뉴의 `Run Python File`(Python 확장)은 PC의 로컬 Python으로 실행하므로 원격 작업 공간에서는 사용하지 마세요. Run 버튼은 마지막에 고른 항목을 기억합니다.
+  - tOS에서 실행하는 데 `Ctrl+Shift+B`(빌드 작업)는 필요하지 않습니다.
+- **터미널 경로 링크**: 터미널에 출력된 `/home/tos/Workspace/...` 경로(Python traceback, gcc, pdb 형식)를 `Ctrl+클릭`하면 로컬 파일의 해당 줄이 열립니다. 보드 site-packages 경로는 로컬 캐시 파일로 연결됩니다.
+- **IntelliSense**: 보드의 Python 패키지 중 `.py`/`.pyi`만 로컬에 복사해 Pylance가 분석합니다.
+  - 전역 site-packages(`/var/lib/tos/...`)는 **필수**로 동기화하며 실패하면 알림을 표시합니다.
+  - `~/.local` 사용자 패키지와 작업 공간의 가상 환경(`uv venv` 등으로 만든 `pyvenv.cfg` 폴더, 2단계 깊이까지)은 **선택**으로 동기화하며, 없거나 실패해도 알림 없이 로그만 남깁니다.
+  - 작업 중 새로 만든 가상 환경은 패널의 **Python 라이브러리 동기화**를 누르면 다시 감지해 반영합니다.
+- **연결 감시**: rclone이 종료되거나 마운트가 끊기면 같은 드라이브로 자동 재연결합니다.
+- **SSH 터미널 안정화**: 연결 단계에서 실패하면 2초 간격으로 최대 3회 다시 시도하고, 세션이 끝날 때 원격 셸의 종료 코드로 인한 알림을 표시하지 않습니다.
+- **표시 언어**: VS Code 표시 언어가 한국어이면 한국어로, 그 밖의 언어에서는 영어로 표시합니다(영어·한국어만 지원). 한국어로 보려면 VS Code에 Korean Language Pack을 설치하고 표시 언어를 한국어로 바꿉니다. 출력 패널의 로그는 영어로만 기록합니다. 확장 정보의 Details/Changelog 탭은 VS Code가 언어별 문서를 지원하지 않아 영어(`README.md`, `CHANGELOG.md`)로 표시되며, 한국어 문서는 `README.ko.md`, `CHANGELOG.ko.md`입니다.
+
+## 요구 사항
+
+| 항목 | 설명 |
+|---|---|
+| Windows 10/11 (x64, arm64) | 현재 Windows만 지원합니다. |
+| [WinFsp](https://winfsp.dev) | 가상 드라이브. 패널/시작 가이드에서 `winget`으로 설치(관리자 승인 필요) |
+| OpenSSH 클라이언트 | Windows 기본 포함(`C:\Windows\System32\OpenSSH\ssh.exe`) |
+| [rclone](https://rclone.org) | 확장이 처음 사용할 때 최신 버전을 내려받아 SHA-256 검증 후 설치. 한 번 설치하면 다시 내려받거나 업데이트하지 않습니다. 오프라인 환경은 `tosRemote.rclonePath` 지정 |
+| Python Debugger 확장 (`ms-python.debugpy`) | 원격 디버깅(F5)에 필요 |
+| 보드의 `debugpy` | tOS-Lite 이미지에 포함 |
+
+## 사용 방법
+
+1. 확장을 설치하면 **시작 가이드**가 열립니다. 닫았다면 명령 팔레트에서 `tOS: 시작 가이드`(영어: `tOS: Getting Started`)를 실행합니다.
+2. 활동 표시줄의 **tOS Remote** 아이콘을 눌러 보드 주소·계정·작업 경로를 확인하고 **연결 테스트**를 누릅니다.
+3. **SSH 키 등록**을 누르고 보드 비밀번호를 한 번 입력합니다. PC에 키가 없으면 `~/.ssh/id_ed25519`를 생성해 보드의 `~/.ssh/authorized_keys`에 등록합니다.
+4. **원격 작업 공간 열기**를 누릅니다. 드라이브가 마운트되고 창이 작업 공간으로 다시 로드됩니다.
+5. 작업이 끝나면 **원격 작업 공간 닫기**를 누릅니다. 보드로 업로드가 끝난 것을 확인한 뒤 마운트를 해제합니다.
+
+- 원격 작업 공간은 한 창에서만 열 수 있습니다. 다른 창에서 열기를 누르면 이미 열린 창으로 이동합니다.
+- 작업 공간을 닫지 않고 VS Code를 종료하면 드라이브 마운트는 유지되며, 다시 실행하면 자동으로 이어서 연결합니다. 패널에서 **마운트 해제**를 누르면 해제됩니다.
+- 비밀번호로만 연결한 경우 터미널은 매번 비밀번호를 묻고, 원격 디버깅(F5)은 사용할 수 없습니다. SSH 키 등록을 권장합니다.
+
+## 설정
+
+| 설정 | 기본값 | 설명 |
+|---|---|---|
+| `tosRemote.host` | `192.168.254.1` | 보드 IP 주소 |
+| `tosRemote.port` | `22` | SSH 포트 |
+| `tosRemote.user` | `tos` | 보드 계정 |
+| `tosRemote.remoteWorkspace` | `/home/tos/Workspace` | 보드 작업 공간 경로 |
+| `tosRemote.driveLetter` | (자동) | 마운트 드라이브. 비우면 Z:부터 빈 문자 |
+| `tosRemote.identityFile` | (자동) | SSH 개인 키 경로 |
+| `tosRemote.pythonCommand` | `python3` | 보드 Python 명령 |
+| `tosRemote.debugPort` | `5678` | debugpy 포트 |
+| `tosRemote.pythonLibraryPaths` | (자동 감지) | IntelliSense용으로 복사할 보드 패키지 경로. 지정하면 모두 필수로 처리 |
+| `tosRemote.pathMappings` | `[]` | 터미널 링크용 추가 경로 매핑 |
+| `tosRemote.rclonePath` | (자동 설치) | 직접 준비한 rclone.exe 경로 |
+
+모든 설정은 PC별(machine) 설정이며 설정 동기화로 다른 PC에 복사되지 않습니다. 비밀번호는 설정이 아닌 VS Code 보안 저장소(SecretStorage)에만 저장됩니다.
+
+## 동작 방식
+
+```
+VS Code (확장) ──HTTP(127.0.0.1, 무작위 포트·계정)──▶ rclone rcd (분리 실행)
+     │                                                  │ SFTP
+     │ ssh.exe (터미널·실행·디버그)                      ▼
+     └──────────────────────────────────────────────▶ Dropbear (보드)
+                                     WinFsp 드라이브 ◀── rclone mount
+```
+
+- rclone은 확장 프로세스와 분리된 제어 서버(`rclone rcd`)로 실행되어 창 재로드·VS Code 종료 후에도 마운트가 유지됩니다.
+- 작업 공간 파일(`.code-workspace`)은 PC의 확장 저장소에 생성되며 보드에는 아무것도 쓰지 않습니다.
+- 저장 후 실행·디버깅 전에 rclone 쓰기 대기열이 빌 때까지 기다려 보드에서 이전 파일이 실행되지 않게 합니다.
+- SSH 터미널은 확장 저장소의 `ssh-terminal.cmd`(cmd.exe)로 실행되어 연결 실패 재시도와 종료 코드 처리를 담당합니다.
+- Python 라이브러리 동기화는 보드(Dropbear)의 동시 접속 제한을 고려해 SSH 연결을 4개 이내로 사용하며, 작업 공간이 열린 뒤 15초 후에 시작합니다.
+- 드라이브 쓰기는 200ms 지연 후 업로드되고, 보드에서 생성된 파일은 최대 10초 안에 보입니다(바로 보려면 **드라이브 새로 고침**).
+
+## 보안 참고
+
+- 보드 재설치로 호스트 키가 바뀌어도 접속되도록 **SSH 호스트 키를 검증하지 않습니다**. 신뢰할 수 있는 네트워크(직결·실습망)에서 사용하세요.
+- 원격 디버깅 중 debugpy는 보드의 `0.0.0.0:5678`에서 연결을 기다립니다.
+- rclone 제어 서버는 `127.0.0.1`에서만 열리며 실행할 때마다 무작위 계정·비밀번호를 사용합니다.
+
+## 문제 해결
+
+- 패널의 **로그 보기**(출력 패널 `tOS Remote`)와 **rclone 로그**를 확인하세요.
+- 드라이브가 사용 중이라는 오류: 패널에서 드라이브를 `자동`으로 두거나 다른 문자를 선택하세요.
+- 보드 연결이 끊기면 상태 표시줄에 `다시 연결 중`이 표시되고 자동으로 재시도합니다.
+
+## 개발
+
+```
+src/            확장 소스 (빌드 단계 없는 순수 JavaScript, 런타임 의존성 없음)
+media/          사이드바 패널(html/css/js), 아이콘, 시작 가이드 문서(영어, ko/ 한국어)
+l10n/           런타임 문자열 한국어 번역 (bundle.l10n.ko.json, 원문은 소스의 영어)
+package.nls*.json  매니페스트 문자열 (영어 기본, .ko 한국어)
+test/run.js     단위 테스트 (node test/run.js, 번역 누락·자리표시자 검사 포함)
+test/integration/  VS Code 확장 호스트 통합 테스트 (보드 대신 로컬 rclone SFTP 서버, 영어·한국어 표시 언어)
+scripts/build-vsix.ps1         Node 없이 .vsix 생성
+scripts/integration-test.ps1   통합 테스트 실행
+```
+
+```powershell
+node test/run.js                       # 단위 테스트
+.\scripts\build-vsix.ps1               # dist\tos-remote-<버전>.vsix 생성 (Node 불필요)
+npx @vscode/vsce package               # 표준 패키징 (Node 필요)
+.\scripts\integration-test.ps1 -CodePath <Code.exe>
+```
+
+통합 테스트는 다른 VS Code 인스턴스가 같은 사용자 데이터로 실행 중이면 시작할 수 없습니다. 포터블 VS Code를 사용 중이라면 `data` 폴더를 제외한 복사본의 `Code.exe`를 지정하세요.
+
+### 다국어
+
+- 사용자에게 보이는 문자열은 소스에 영어로 쓰고 `t('...')`(`src/i18n.js`, 내부적으로 `vscode.l10n.t`)로 감쌉니다. 작은따옴표 문자열만 사용합니다.
+- 문서는 영어(`README.md`, `CHANGELOG.md`)와 한국어(`README.ko.md`, `CHANGELOG.ko.md`)를 함께 갱신합니다.
+- 한국어 번역은 `l10n/bundle.l10n.ko.json`에 영어 원문을 키로 추가합니다. 매니페스트 문자열은 `package.nls.json`/`package.nls.ko.json`에 같은 키로 추가합니다.
+- `node test/run.js`가 번역 누락·미사용 항목과 `{0}` 자리표시자 불일치를 검사합니다.
+- 통합 테스트는 한국어 언어 팩(`MS-CEINTL.vscode-language-pack-ko`)을 격리된 확장 폴더에 설치하고 `--locale=ko`로 한 번 더 실행합니다. 네트워크가 없으면 `-SkipKorean`을 지정하세요.
+
+## 라이선스
+
+공개 전에 LICENSE 파일과 `package.json`의 `license`, `repository` 필드를 추가해야 합니다.

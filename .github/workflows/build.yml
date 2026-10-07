@@ -1,0 +1,35 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Unit tests
+        run: node test/run.js
+
+      # LICENSE·repository 필드를 추가하면 --skip-license, --allow-missing-repository를 제거한다
+      - name: Package
+        run: npx --yes @vscode/vsce package --out dist/ --skip-license --allow-missing-repository
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: dist/*.vsix
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.vsix

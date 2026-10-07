@@ -1,0 +1,441 @@
+{
+    "name": "tos-remote",
+    "displayName": "%displayName%",
+    "description": "%description%",
+    "version": "0.2.0",
+    "publisher": "PlanXLab",
+    "engines": {
+        "vscode": "^1.82.0"
+    },
+    "categories": [
+        "Other",
+        "Debuggers"
+    ],
+    "keywords": [
+        "tOS",
+        "tOS-Lite",
+        "Raspberry Pi",
+        "rclone",
+        "sftp",
+        "remote",
+        "debugpy"
+    ],
+    "main": "./src/extension.js",
+    "l10n": "./l10n",
+    "extensionKind": [
+        "ui"
+    ],
+    "activationEvents": [
+        "onStartupFinished",
+        "onDebugResolve:tos-remote"
+    ],
+    "capabilities": {
+        "virtualWorkspaces": false,
+        "untrustedWorkspaces": {
+            "supported": "limited",
+            "description": "%capabilities.untrusted%"
+        }
+    },
+    "scripts": {
+        "test": "node test/run.js",
+        "package": "npx --yes @vscode/vsce package --out dist/ --skip-license --allow-missing-repository"
+    },
+    "contributes": {
+        "configuration": {
+            "title": "%config.title%",
+            "properties": {
+                "tosRemote.host": {
+                    "type": "string",
+                    "default": "192.168.254.1",
+                    "scope": "machine",
+                    "order": 1,
+                    "description": "%config.host%"
+                },
+                "tosRemote.port": {
+                    "type": "integer",
+                    "default": 22,
+                    "minimum": 1,
+                    "maximum": 65535,
+                    "scope": "machine",
+                    "order": 2,
+                    "description": "%config.port%"
+                },
+                "tosRemote.user": {
+                    "type": "string",
+                    "default": "tos",
+                    "scope": "machine",
+                    "order": 3,
+                    "description": "%config.user%"
+                },
+                "tosRemote.remoteWorkspace": {
+                    "type": "string",
+                    "default": "/home/tos/Workspace",
+                    "scope": "machine",
+                    "order": 4,
+                    "description": "%config.remoteWorkspace%"
+                },
+                "tosRemote.driveLetter": {
+                    "type": "string",
+                    "default": "",
+                    "pattern": "^([D-Zd-z]:?)?$",
+                    "scope": "machine",
+                    "order": 5,
+                    "markdownDescription": "%config.driveLetter%"
+                },
+                "tosRemote.identityFile": {
+                    "type": "string",
+                    "default": "",
+                    "scope": "machine",
+                    "order": 6,
+                    "markdownDescription": "%config.identityFile%"
+                },
+                "tosRemote.pythonCommand": {
+                    "type": "string",
+                    "default": "python3",
+                    "scope": "machine",
+                    "order": 7,
+                    "description": "%config.pythonCommand%"
+                },
+                "tosRemote.debugPort": {
+                    "type": "integer",
+                    "default": 5678,
+                    "minimum": 1024,
+                    "maximum": 65535,
+                    "scope": "machine",
+                    "order": 8,
+                    "description": "%config.debugPort%"
+                },
+                "tosRemote.pythonLibraryPaths": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "scope": "machine",
+                    "order": 9,
+                    "markdownDescription": "%config.pythonLibraryPaths%"
+                },
+                "tosRemote.pathMappings": {
+                    "type": "array",
+                    "default": [],
+                    "scope": "machine",
+                    "order": 10,
+                    "markdownDescription": "%config.pathMappings%",
+                    "items": {
+                        "type": "object",
+                        "required": [
+                            "remote",
+                            "local"
+                        ],
+                        "properties": {
+                            "remote": {
+                                "type": "string",
+                                "description": "%config.pathMappings.remote%"
+                            },
+                            "local": {
+                                "type": "string",
+                                "description": "%config.pathMappings.local%"
+                            }
+                        }
+                    }
+                },
+                "tosRemote.rclonePath": {
+                    "type": "string",
+                    "default": "",
+                    "scope": "machine",
+                    "order": 11,
+                    "description": "%config.rclonePath%"
+                }
+            }
+        },
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "tosRemote",
+                    "title": "%displayName%",
+                    "icon": "media/tos-lite.svg"
+                }
+            ]
+        },
+        "views": {
+            "tosRemote": [
+                {
+                    "type": "webview",
+                    "id": "tosRemote.panel",
+                    "name": "%view.panel%",
+                    "icon": "media/tos-lite.svg"
+                }
+            ]
+        },
+        "commands": [
+            {
+                "command": "tosRemote.openWorkspace",
+                "title": "%command.openWorkspace%",
+                "category": "tOS",
+                "icon": "$(remote)"
+            },
+            {
+                "command": "tosRemote.closeWorkspace",
+                "title": "%command.closeWorkspace%",
+                "category": "tOS",
+                "icon": "$(close)"
+            },
+            {
+                "command": "tosRemote.focusWorkspaceWindow",
+                "title": "%command.focusWorkspaceWindow%",
+                "category": "tOS"
+            },
+            {
+                "command": "tosRemote.testConnection",
+                "title": "%command.testConnection%",
+                "category": "tOS"
+            },
+            {
+                "command": "tosRemote.setupSshKey",
+                "title": "%command.setupSshKey%",
+                "category": "tOS"
+            },
+            {
+                "command": "tosRemote.setPassword",
+                "title": "%command.setPassword%",
+                "category": "tOS"
+            },
+            {
+                "command": "tosRemote.clearPassword",
+                "title": "%command.clearPassword%",
+                "category": "tOS"
+            },
+            {
+                "command": "tosRemote.syncPythonLibraries",
+                "title": "%command.syncPythonLibraries%",
+                "category": "tOS"
+            },
+            {
+                "command": "tosRemote.refreshDrive",
+                "title": "%command.refreshDrive%",
+                "category": "tOS",
+                "icon": "$(refresh)"
+            },
+            {
+                "command": "tosRemote.showLog",
+                "title": "%command.showLog%",
+                "category": "tOS",
+                "icon": "$(output)"
+            },
+            {
+                "command": "tosRemote.showRcloneLog",
+                "title": "%command.showRcloneLog%",
+                "category": "tOS"
+            },
+            {
+                "command": "tosRemote.openSettings",
+                "title": "%command.openSettings%",
+                "category": "tOS",
+                "icon": "$(settings-gear)"
+            },
+            {
+                "command": "tosRemote.openWalkthrough",
+                "title": "%command.openWalkthrough%",
+                "category": "tOS",
+                "icon": "$(question)"
+            },
+            {
+                "command": "tosRemote.installRclone",
+                "title": "%command.installRclone%",
+                "category": "tOS"
+            },
+            {
+                "command": "tosRemote.installWinFsp",
+                "title": "%command.installWinFsp%",
+                "category": "tOS"
+            },
+            {
+                "command": "tosRemote.runFile",
+                "title": "%command.runFile%",
+                "category": "tOS",
+                "icon": "$(play)"
+            },
+            {
+                "command": "tosRemote.debugFile",
+                "title": "%command.debugFile%",
+                "category": "tOS",
+                "icon": "$(debug-alt)"
+            },
+            {
+                "command": "tosRemote.showMenu",
+                "title": "%command.showMenu%",
+                "category": "tOS"
+            }
+        ],
+        "menus": {
+            "view/title": [
+                {
+                    "command": "tosRemote.openWalkthrough",
+                    "when": "view == tosRemote.panel",
+                    "group": "navigation@1"
+                },
+                {
+                    "command": "tosRemote.showLog",
+                    "when": "view == tosRemote.panel",
+                    "group": "navigation@2"
+                },
+                {
+                    "command": "tosRemote.openSettings",
+                    "when": "view == tosRemote.panel",
+                    "group": "navigation@3"
+                }
+            ],
+            "editor/title/run": [
+                {
+                    "command": "tosRemote.runFile",
+                    "when": "tosRemote.workspaceOpen && resourceLangId == python",
+                    "group": "navigation@-20"
+                },
+                {
+                    "command": "tosRemote.debugFile",
+                    "when": "tosRemote.workspaceOpen && resourceLangId == python",
+                    "group": "navigation@-19"
+                }
+            ],
+            "commandPalette": [
+                {
+                    "command": "tosRemote.runFile",
+                    "when": "tosRemote.workspaceOpen"
+                },
+                {
+                    "command": "tosRemote.debugFile",
+                    "when": "tosRemote.workspaceOpen"
+                },
+                {
+                    "command": "tosRemote.showMenu",
+                    "when": "false"
+                }
+            ]
+        },
+        "debuggers": [
+            {
+                "type": "tos-remote",
+                "label": "%debugger.label%",
+                "languages": [
+                    "python"
+                ],
+                "configurationAttributes": {
+                    "launch": {
+                        "properties": {
+                            "program": {
+                                "type": "string",
+                                "description": "%debugger.program%",
+                                "default": "${file}"
+                            },
+                            "justMyCode": {
+                                "type": "boolean",
+                                "description": "%debugger.justMyCode%",
+                                "default": true
+                            }
+                        }
+                    }
+                },
+                "initialConfigurations": [
+                    {
+                        "name": "%debugger.currentFile%",
+                        "type": "tos-remote",
+                        "request": "launch",
+                        "program": "${file}",
+                        "justMyCode": true
+                    }
+                ],
+                "configurationSnippets": [
+                    {
+                        "label": "%debugger.currentFile%",
+                        "description": "%debugger.snippet.description%",
+                        "body": {
+                            "name": "%debugger.currentFile%",
+                            "type": "tos-remote",
+                            "request": "launch",
+                            "program": "^\"\\${file}\"",
+                            "justMyCode": true
+                        }
+                    }
+                ]
+            }
+        ],
+        "taskDefinitions": [
+            {
+                "type": "tos-remote",
+                "required": [
+                    "file"
+                ],
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": "%task.file%"
+                    }
+                }
+            }
+        ],
+        "walkthroughs": [
+            {
+                "id": "tosRemote.gettingStarted",
+                "title": "%walkthrough.title%",
+                "description": "%walkthrough.description%",
+                "steps": [
+                    {
+                        "id": "winfsp",
+                        "title": "%walkthrough.winfsp.title%",
+                        "description": "%walkthrough.winfsp.description%",
+                        "media": {
+                            "markdown": "%walkthrough.winfsp.media%"
+                        },
+                        "completionEvents": [
+                            "onContext:tosRemote.winfspReady"
+                        ]
+                    },
+                    {
+                        "id": "rclone",
+                        "title": "%walkthrough.rclone.title%",
+                        "description": "%walkthrough.rclone.description%",
+                        "media": {
+                            "markdown": "%walkthrough.rclone.media%"
+                        },
+                        "completionEvents": [
+                            "onContext:tosRemote.rcloneReady"
+                        ]
+                    },
+                    {
+                        "id": "board",
+                        "title": "%walkthrough.board.title%",
+                        "description": "%walkthrough.board.description%",
+                        "media": {
+                            "markdown": "%walkthrough.board.media%"
+                        },
+                        "completionEvents": [
+                            "onContext:tosRemote.connectionTested"
+                        ]
+                    },
+                    {
+                        "id": "sshKey",
+                        "title": "%walkthrough.sshKey.title%",
+                        "description": "%walkthrough.sshKey.description%",
+                        "media": {
+                            "markdown": "%walkthrough.sshKey.media%"
+                        },
+                        "completionEvents": [
+                            "onContext:tosRemote.sshKeyReady"
+                        ]
+                    },
+                    {
+                        "id": "open",
+                        "title": "%walkthrough.open.title%",
+                        "description": "%walkthrough.open.description%",
+                        "media": {
+                            "markdown": "%walkthrough.open.media%"
+                        },
+                        "completionEvents": [
+                            "onCommand:tosRemote.openWorkspace"
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+}
