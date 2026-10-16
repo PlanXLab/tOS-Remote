@@ -5,23 +5,29 @@ const os = require('os');
 const path = require('path');
 const vscode = require('vscode');
 const { SshClient } = require('./ssh');
+const { AskpassBroker } = require('./askpass');
 const { Rclone } = require('./rclone');
 const { AuthManager } = require('./auth');
 const { Prerequisites } = require('./prereq');
 const { SessionManager } = require('./session');
 const { Runner, DebugConfigurationProvider } = require('./runner');
+const { BoardTools } = require('./boardTools');
+const { JupyterManager } = require('./jupyter');
 const { TerminalLinkProvider } = require('./terminalLinks');
 const { StatusBar } = require('./statusBar');
 const { PanelProvider } = require('./panel');
-const { getSettings, validateSettings, targetOf, SECTION } = require('./settings');
+const { getSettings, validateSettings, targetOf, migrateSettings, SECTION } = require('./settings');
 const { probeTcp } = require('./util');
 const { t } = require('./i18n');
 
 const EXTENSION_ID = 'PlanXLab.tos-remote';
 const WALKTHROUGH_ID = `${EXTENSION_ID}#tosRemote.gettingStarted`;
+// "#%%" 셀이 있는 Python 파일 (Jupyter 커널 선택기에 tOS 서버를 미리 등록)
+const CELL_MARKER = /^\s*#\s*%%/m;
 
 let sessionManager;
 let runnerInstance;
+let jupyterManager;
 
 function activate(context) {
     const log = vscode.window.createOutputChannel('tOS Remote', { log: true });
@@ -31,7 +37,14 @@ function activate(context) {
     fs.mkdirSync(storageDir, { recursive: true });
     const localDir = path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'tOS Remote');
 
-    const ssh = new SshClient({ knownHostsFile: path.join(storageDir, 'known_hosts'), logger: log });
+    // 비밀번호 인증용 SSH_ASKPASS 도우미 (Code.exe를 Node로 실행)
+    const askpass = new AskpassBroker({
+        storageDir,
+        nodeExecutable: process.execPath,
+        helperScript: path.join(context.extensionPath, 'src', 'askpassHelper.js'),
+        logger: log
+    });
+    const ssh = new SshClient({ knownHostsFile: path.join(storageDir, 'known_hosts'), logger: log, askpass });
     const prereq = new Prerequisites(context, ssh, log, path.join(storageDir, 'bin'));
     const rclone = new Rclone({
         storageDir,
@@ -43,33 +56,49 @@ function activate(context) {
     const auth = new AuthManager(context, ssh, rclone, log);
     const sessionMgr = new SessionManager({ context, log, ssh, rclone, auth, prereq, storageDir });
     const runner = new Runner(sessionMgr, ssh, log);
+    const boardTools = new BoardTools({ log, ssh, rclone, sessionMgr, prereq, auth, storageDir, localDir });
+    const jupyter = new JupyterManager({ log, ssh, sessionMgr, boardTools });
+    runner.boardTools = boardTools;
     sessionManager = sessionMgr;
     runnerInstance = runner;
+    jupyterManager = jupyter;
     sessionMgr.onBeforeClose = async () => {
         if (vscode.debug.activeDebugSession) {
             await vscode.debug.stopDebugging();
         }
         runner.stopDebuggee(false);
+        // 작업 공간을 닫으면 이 창에서 시작한 보드 Jupyter 서버도 끝낸다
+        await jupyter.stop({ quiet: true });
     };
 
     const statusBar = new StatusBar();
-    const panel = new PanelProvider(context, { sessionMgr, prereq, auth });
+    const panel = new PanelProvider(context, { sessionMgr, prereq, auth, boardTools, jupyter });
 
     context.subscriptions.push(
         statusBar,
         prereq,
         { dispose: () => runner.dispose() },
+        { dispose: () => jupyter.dispose() },
         { dispose: () => sessionMgr.dispose() },
         sessionMgr.onDidChange((status) => {
             statusBar.update(status);
             panel.postState();
         }),
         prereq.onDidChange(() => panel.postState()),
+        boardTools.onDidChange(() => panel.postState()),
+        jupyter.onDidChange((status) => {
+            statusBar.setJupyter(status.phase);
+            panel.postState();
+        }),
+        vscode.extensions.onDidChange(() => panel.postState()),
         vscode.workspace.onDidChangeConfiguration((event) => {
             if (event.affectsConfiguration(SECTION)) {
                 panel.postState();
             }
         }),
+        // Interactive 창·노트북을 열거나 #%% 셀이 있는 파일을 볼 때 커널 선택기에 tOS 서버를 등록한다
+        vscode.workspace.onDidOpenNotebookDocument(() => jupyter.registerCollection()),
+        vscode.window.onDidChangeActiveTextEditor((editor) => registerForCells(jupyter, editor)),
         vscode.window.registerWebviewViewProvider('tosRemote.panel', panel),
         vscode.window.registerTerminalLinkProvider(new TerminalLinkProvider(sessionMgr)),
         vscode.debug.registerDebugConfigurationProvider('tos-remote', new DebugConfigurationProvider(runner, sessionMgr)),
@@ -96,9 +125,17 @@ function activate(context) {
         'tosRemote.openWalkthrough': () => vscode.commands.executeCommand('workbench.action.openWalkthrough', WALKTHROUGH_ID, false),
         'tosRemote.installRclone': () => prereq.installRclone(),
         'tosRemote.installWinFsp': () => prereq.installWinFsp(),
+        'tosRemote.installUv': () => prereq.installUv(),
         'tosRemote.runFile': (uri) => runner.runFile(uri),
         'tosRemote.debugFile': (uri) => runner.debugFile(uri),
-        'tosRemote.showMenu': () => showMenu(sessionMgr)
+        'tosRemote.checkBoardTools': () => boardTools.check({ interactive: true })
+            .catch((error) => sessionMgr.reportError(t('Could not check the board tools.'), error)),
+        'tosRemote.installDebugTools': () => boardTools.install('debug'),
+        'tosRemote.installJupyter': () => boardTools.install('jupyter'),
+        'tosRemote.startJupyter': () => jupyter.start(),
+        'tosRemote.stopJupyter': () => jupyter.stop(),
+        'tosRemote.showJupyterLog': () => jupyter.showLog(),
+        'tosRemote.showMenu': () => showMenu(sessionMgr, jupyter)
     };
     for (const [id, handler] of Object.entries(commands)) {
         context.subscriptions.push(vscode.commands.registerCommand(id, handler));
@@ -110,10 +147,32 @@ function activate(context) {
     const settings = getSettings();
     vscode.commands.executeCommand('setContext', 'tosRemote.sshKeyReady', !!settings.host && auth.wasKeyOk(targetOf(settings)));
     prereq.refresh().catch((error) => log.warn(`Prerequisite check error: ${error.message}`));
-    sessionMgr.initialize().catch((error) => log.error(`Initialization error: ${error.stack || error.message}`));
+    // 이전 형식(/home/<user>/Workspace)의 작업 공간 설정을 먼저 바꾼 뒤 세션을 초기화한다
+    migrateSettings(log)
+        .catch((error) => log.warn(`Settings migration error: ${error.message}`))
+        .then(() => sessionMgr.initialize())
+        .then(() => {
+            if (sessionMgr.isOwnerWindow()) {
+                // 이전에 시작한 보드 Jupyter 서버가 실행 중이면 다시 연결하고, 셀 실행 준비를 한다
+                jupyter.attach();
+                const jupyterExtension = vscode.extensions.getExtension('ms-toolsai.jupyter');
+                if (jupyterExtension && jupyterExtension.isActive) {
+                    jupyter.registerCollection();
+                }
+                registerForCells(jupyter, vscode.window.activeTextEditor);
+            }
+        })
+        .catch((error) => log.error(`Initialization error: ${error.stack || error.message}`));
 
     // 통합 테스트용 내부 API
-    return { sessionMgr, rclone, auth, prereq, ssh, runner };
+    return { sessionMgr, rclone, auth, prereq, ssh, runner, boardTools, jupyter, askpass };
+}
+
+function registerForCells(jupyter, editor) {
+    const document = editor && editor.document;
+    if (document && document.languageId === 'python' && document.lineCount < 20000 && CELL_MARKER.test(document.getText())) {
+        jupyter.registerCollection();
+    }
 }
 
 async function testConnection({ ssh, auth, prereq, panel, log }) {
@@ -246,7 +305,7 @@ async function showRcloneLog(rclone) {
     editor.revealRange(new vscode.Range(end, end));
 }
 
-async function showMenu(sessionMgr) {
+async function showMenu(sessionMgr, jupyter) {
     const phase = (sessionMgr.status && sessionMgr.status.phase) || 'idle';
     const items = [];
     if (phase === 'idle' || phase === 'detached') {
@@ -261,6 +320,11 @@ async function showMenu(sessionMgr) {
     if (phase === 'open') {
         items.push({ label: `$(play) ${t('Run on tOS')}`, description: 'Ctrl+F5', command: 'tosRemote.runFile' });
         items.push({ label: `$(debug-alt) ${t('Debug on tOS')}`, description: 'F5', command: 'tosRemote.debugFile' });
+        const jupyterRunning = jupyter.status().phase !== 'stopped';
+        items.push(jupyterRunning
+            ? { label: `$(debug-stop) ${t('Stop Jupyter on tOS')}`, command: 'tosRemote.stopJupyter' }
+            : { label: `$(notebook) ${t('Start Jupyter on tOS')}`, command: 'tosRemote.startJupyter' });
+        items.push({ label: `$(tools) ${t('Check Board Tools')}`, command: 'tosRemote.checkBoardTools' });
         items.push({ label: `$(refresh) ${t('Refresh Drive')}`, command: 'tosRemote.refreshDrive' });
         items.push({ label: `$(library) ${t('Sync Python Libraries')}`, command: 'tosRemote.syncPythonLibraries' });
     }
@@ -279,6 +343,9 @@ async function showMenu(sessionMgr) {
 function deactivate() {
     if (runnerInstance) {
         runnerInstance.dispose();
+    }
+    if (jupyterManager) {
+        jupyterManager.dispose();
     }
     if (sessionManager) {
         sessionManager.dispose();

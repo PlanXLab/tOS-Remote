@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const { shellQuote, normalizeRemotePath, lastLine, noopLogger } = require('./util');
 const { sftpEnv } = require('./rclone');
+const { TOOLS_PROBE_PY, parseProbeOutput } = require('./boardScripts');
 
 // 라이브러리 종류: system(전역, 필수) · custom(사용자 지정, 필수) · user(~/.local, 선택) · venv(작업 공간 가상 환경, 선택)
 const REQUIRED_KINDS = new Set(['system', 'custom']);
@@ -94,16 +95,25 @@ const DETECT_SCRIPT = [
     '    dirs[:] = [] if depth >= 2 else [d for d in dirs if d not in ("node_modules", "__pycache__", ".git")]'
 ].join('\n');
 
-/** 보드의 Python에 라이브러리 경로를 질의한다 (SSH 키 인증 필요) */
-async function detectRemoteLibraries(ssh, target, keyPath, pythonCommand, remoteWorkspace, logger = noopLogger) {
+/**
+ * 보드의 Python에 라이브러리 경로를 질의한다. 같은 연결에서 보드 도구(debugpy·Jupyter) 상태도 확인한다.
+ * @param {{keyPath?: string, password?: string}} sshAuth 키 또는 비밀번호(SSH_ASKPASS)
+ * @returns {Promise<{libraries: object[], aliases: object[], tools?: object}|undefined>}
+ */
+async function detectRemoteLibraries(ssh, target, sshAuth, pythonCommand, remoteWorkspace, logger = noopLogger) {
     try {
-        const command = `${pythonCommand} -c ${shellQuote(DETECT_SCRIPT)} ${shellQuote(remoteWorkspace)}`;
-        const result = await ssh.exec(target, command, { keyPath, timeoutMs: 30000 });
+        const script = `${DETECT_SCRIPT}\n${TOOLS_PROBE_PY}`;
+        const command = `${pythonCommand} -c ${shellQuote(script)} ${shellQuote(remoteWorkspace)}`;
+        const result = await ssh.exec(target, command, { ...sshAuth, timeoutMs: 30000 });
         if (result.code !== 0) {
             logger.warn(`Python library path detection failed: ${lastLine(result.stderr) || `exit ${result.code}`}`);
             return undefined;
         }
         const detected = parseDetectedPaths(result.stdout);
+        const tools = parseProbeOutput(result.stdout);
+        if (tools && !tools.error) {
+            detected.tools = tools;
+        }
         return detected.libraries.length ? detected : undefined;
     } catch (error) {
         logger.warn(`Python library path detection error: ${error.message}`);

@@ -2,7 +2,7 @@
     "name": "tos-remote",
     "displayName": "%displayName%",
     "description": "%description%",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "publisher": "PlanXLab",
     "license": "GPL-3.0-or-later",
     "icon": "media/icon.png",
@@ -32,7 +32,8 @@
         "rclone",
         "sftp",
         "remote",
-        "debugpy"
+        "debugpy",
+        "jupyter"
     ],
     "main": "./src/extension.js",
     "l10n": "./l10n",
@@ -84,10 +85,10 @@
                 },
                 "tosRemote.remoteWorkspace": {
                     "type": "string",
-                    "default": "/home/tos/Workspace",
+                    "default": "Workspace",
                     "scope": "machine",
                     "order": 4,
-                    "description": "%config.remoteWorkspace%"
+                    "markdownDescription": "%config.remoteWorkspace%"
                 },
                 "tosRemote.driveLetter": {
                     "type": "string",
@@ -160,6 +161,13 @@
                     "scope": "machine",
                     "order": 11,
                     "description": "%config.rclonePath%"
+                },
+                "tosRemote.packageExcludeNewer": {
+                    "type": "string",
+                    "default": "",
+                    "scope": "machine",
+                    "order": 12,
+                    "markdownDescription": "%config.packageExcludeNewer%"
                 }
             }
         },
@@ -277,6 +285,42 @@
                 "icon": "$(debug-alt)"
             },
             {
+                "command": "tosRemote.checkBoardTools",
+                "title": "%command.checkBoardTools%",
+                "category": "tOS"
+            },
+            {
+                "command": "tosRemote.installDebugTools",
+                "title": "%command.installDebugTools%",
+                "category": "tOS"
+            },
+            {
+                "command": "tosRemote.installJupyter",
+                "title": "%command.installJupyter%",
+                "category": "tOS"
+            },
+            {
+                "command": "tosRemote.startJupyter",
+                "title": "%command.startJupyter%",
+                "category": "tOS",
+                "icon": "$(notebook)"
+            },
+            {
+                "command": "tosRemote.stopJupyter",
+                "title": "%command.stopJupyter%",
+                "category": "tOS"
+            },
+            {
+                "command": "tosRemote.showJupyterLog",
+                "title": "%command.showJupyterLog%",
+                "category": "tOS"
+            },
+            {
+                "command": "tosRemote.installUv",
+                "title": "%command.installUv%",
+                "category": "tOS"
+            },
+            {
                 "command": "tosRemote.showMenu",
                 "title": "%command.showMenu%",
                 "category": "tOS"
@@ -319,6 +363,30 @@
                 },
                 {
                     "command": "tosRemote.debugFile",
+                    "when": "tosRemote.workspaceOpen"
+                },
+                {
+                    "command": "tosRemote.checkBoardTools",
+                    "when": "tosRemote.workspaceOpen"
+                },
+                {
+                    "command": "tosRemote.installDebugTools",
+                    "when": "tosRemote.workspaceOpen"
+                },
+                {
+                    "command": "tosRemote.installJupyter",
+                    "when": "tosRemote.workspaceOpen"
+                },
+                {
+                    "command": "tosRemote.startJupyter",
+                    "when": "tosRemote.workspaceOpen"
+                },
+                {
+                    "command": "tosRemote.stopJupyter",
+                    "when": "tosRemote.workspaceOpen"
+                },
+                {
+                    "command": "tosRemote.showJupyterLog",
                     "when": "tosRemote.workspaceOpen"
                 },
                 {

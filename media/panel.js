@@ -36,6 +36,82 @@
         el.textContent = ok ? '✓' : unknown ? '?' : '✗';
     }
 
+    function neutral(id) {
+        const el = $(id);
+        el.className = 'mark unknown';
+        el.textContent = '–';
+    }
+
+    // 보드 도구 (원격 작업 공간 창에서만): Python 정보, debugpy·run_debug.sh, Jupyter 패키지·서버
+    function renderTools() {
+        const tools = state.tools || {};
+        const jupyter = state.jupyter || {};
+        const busy = !!tools.checking || !!tools.installing;
+        let hint = '';
+        if (!tools.available) {
+            hint = L.toolsUnavailable;
+        } else if (!tools.checked) {
+            hint = tools.checking ? L.checking : tools.error ? fmt(L.toolsError, tools.error) : L.toolsNotChecked;
+        } else if (tools.error) {
+            hint = fmt(L.toolsError, tools.error);
+        }
+        setLine('toolsHint', hint);
+        $('toolsBadge').textContent = tools.installing ? L.toolsInstalling : tools.checking ? L.checking : '';
+        $('toolsBadge').className = 'summary-badge';
+        show('toolsList', !!tools.available && !!tools.checked);
+
+        if (tools.python) {
+            mark('pythonMark', true);
+            $('pythonText').textContent = fmt(L.pythonInfo, tools.python.version, tools.python.machine, tools.python.libc);
+        }
+        const debug = tools.debug;
+        if (debug) {
+            mark('debugMark', debug.ready, !!debug.debugpy && !debug.ready);
+            $('debugText').textContent = !debug.debugpy ? L.debugMissing : debug.runDebug ? fmt(L.debugReady, debug.debugpy) : fmt(L.debugNoScript, debug.debugpy);
+        }
+        show('btnInstallDebug', !!debug && !debug.ready);
+        const packages = tools.jupyter;
+        if (packages) {
+            mark('jupyterMark', packages.ready);
+            $('jupyterText').textContent = packages.ready ? fmt(L.jupyterReady, packages.jupyterServer, packages.ipykernel) : L.jupyterMissing;
+        }
+        show('btnInstallJupyter', !!packages && !packages.ready);
+
+        const phase = jupyter.phase || 'stopped';
+        show('jupyterServerRow', !!packages && (packages.ready || phase !== 'stopped'));
+        $('jupyterDot').className = `dot ${{ running: 'on', reconnecting: 'warn', starting: 'busy', stopping: 'busy' }[phase] || ''}`;
+        const serverText = {
+            starting: L.jupyterStarting,
+            running: fmt(L.jupyterRunning, jupyter.localPort),
+            reconnecting: L.jupyterReconnecting,
+            stopping: L.jupyterStopping
+        };
+        $('jupyterServerText').textContent = serverText[phase] || L.jupyterStopped;
+        show('btnJupyterStart', phase === 'stopped');
+        show('btnJupyterStop', phase === 'running' || phase === 'reconnecting');
+        let jupyterHint = '';
+        if (tools.available && phase === 'running') {
+            jupyterHint = jupyter.extensionInstalled ? L.jupyterHint : L.jupyterExtensionMissing;
+        } else if (tools.available && phase === 'stopped' && jupyter.error) {
+            jupyterHint = jupyter.error;
+        }
+        setLine('jupyterHint', jupyterHint);
+
+        for (const id of ['btnInstallDebug', 'btnInstallJupyter', 'btnJupyterStart', 'btnJupyterStop', 'btnToolsCheck', 'btnJupyterLog']) {
+            /** @type {HTMLButtonElement} */ ($(id)).disabled = busy || phase === 'starting' || phase === 'stopping';
+        }
+        show('btnToolsCheck', !!tools.available);
+        show('btnJupyterLog', !!tools.available && !!packages && packages.ready);
+    }
+
+    // 작업 공간은 /home/<계정>/ 아래 상대 경로만 입력한다. 앞부분은 계정으로 자동 표시.
+    function updateWorkspacePrefix(user) {
+        const name = String(user || '').trim();
+        $('workspacePrefix').textContent = name === 'root' ? '/root/' : `/home/${name || '…'}/`;
+    }
+
+    $('user').addEventListener('input', () => updateWorkspacePrefix(/** @type {HTMLInputElement} */ ($('user')).value));
+
     function render() {
         if (!state) {
             return;
@@ -81,6 +157,7 @@
             }
         }
         $('formHint').textContent = locked ? L.settingsLocked : '';
+        updateWorkspacePrefix(document.activeElement === $('user') ? /** @type {HTMLInputElement} */ ($('user')).value : state.settings.user);
         /** @type {HTMLButtonElement} */ ($('btnTest')).disabled = busy;
 
         const test = state.lastTest;
@@ -113,6 +190,18 @@
             prereqAutoOpened = true;
             /** @type {HTMLDetailsElement} */ ($('prereqSection')).open = true;
         }
+
+        // uv: 보드 패키지 설치에만 필요하므로 준비 상태 요약에는 넣지 않는다
+        if (p.uvVersion) {
+            mark('uvMark', true);
+            $('uvText').textContent = fmt(L.uvInstalled, p.uvVersion);
+        } else {
+            neutral('uvMark');
+            $('uvText').textContent = L.uvNotInstalled;
+        }
+        show('btnUv', p.checked && !p.uvVersion);
+
+        renderTools();
 
         const hasSession = !!s && (phase === 'open' || phase === 'detached' || phase === 'elsewhere');
         /** @type {HTMLButtonElement} */ ($('btnSync')).disabled = !hasSession || state.libSyncRunning;

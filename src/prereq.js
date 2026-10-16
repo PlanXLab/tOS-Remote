@@ -2,8 +2,8 @@
 
 const path = require('path');
 const vscode = require('vscode');
-const { installRclone, findWinFsp } = require('./installer');
-const { Rclone, MIN_VERSION } = require('./rclone');
+const { installRclone, findWinFsp, installUv, getUvVersion } = require('./installer');
+const { Rclone, MIN_VERSION, compareVersions } = require('./rclone');
 const { findExecutable } = require('./util');
 const { getSettings } = require('./settings');
 const { t } = require('./i18n');
@@ -11,6 +11,8 @@ const { t } = require('./i18n');
 const WINFSP_RELEASES = 'https://winfsp.dev/rel/';
 const OPENSSH_DOCS = 'https://learn.microsoft.com/windows-server/administration/openssh/openssh_install_firstuse';
 const PREREQ_STATE_KEY = 'tosRemote.prereqState';
+// pylock.toml 출력과 manylinux_2_40 대상을 지원하는 버전
+const MIN_UV_VERSION = '0.8.0';
 
 class Prerequisites {
     constructor(context, ssh, log, binDir) {
@@ -30,9 +32,13 @@ class Prerequisites {
         return getSettings().rclonePath || path.join(this.binDir, 'rclone.exe');
     }
 
+    uvExePath() {
+        return path.join(this.binDir, 'uv.exe');
+    }
+
     async refresh() {
-        const [winfsp, rcloneVersion] = await Promise.all([findWinFsp(), this.rclone.getVersion()]);
-        this.state = { winfsp, ssh: !!this.ssh.sshPath, rcloneVersion };
+        const [winfsp, rcloneVersion, uvVersion] = await Promise.all([findWinFsp(), this.rclone.getVersion(), getUvVersion(this.uvExePath())]);
+        this.state = { winfsp, ssh: !!this.ssh.sshPath, rcloneVersion, uvVersion };
         this.checked = true;
         this.emitter.fire(this.state);
         await Promise.all([
@@ -168,6 +174,64 @@ class Prerequisites {
             if (pick === openPage) {
                 vscode.env.openExternal(vscode.Uri.parse(WINFSP_RELEASES));
             }
+        }
+    }
+
+    static isSupportedUv(version) {
+        return !!version && compareVersions(version, MIN_UV_VERSION) >= 0;
+    }
+
+    /**
+     * 보드용 패키지 해석에 쓰는 uv를 준비한다 (PyPI에서 SHA-256 검증 후 확장 저장소에 설치, 업데이트하지 않음).
+     * @returns {Promise<string>} uv.exe 경로
+     */
+    async ensureUv(options = {}) {
+        let version = await getUvVersion(this.uvExePath());
+        if (Prerequisites.isSupportedUv(version)) {
+            return this.uvExePath();
+        }
+        if (!options.interactive) {
+            throw new Error(t('uv is not installed. Install it from the tOS Remote panel.'));
+        }
+        const download = t('Download');
+        const pick = await vscode.window.showWarningMessage(
+            t('Installing packages on the board requires uv (about 15 MB), which resolves packages for the board on this PC. The first time, uv also downloads a Python runtime for resolution (about 21 MB). Download uv now?'),
+            { modal: true },
+            download
+        );
+        if (pick !== download) {
+            throw new vscode.CancellationError();
+        }
+        const result = await this.installUv();
+        version = result && result.version;
+        if (!Prerequisites.isSupportedUv(version)) {
+            throw new Error(t('uv is not ready yet.'));
+        }
+        return this.uvExePath();
+    }
+
+    async installUv() {
+        const installed = await getUvVersion(this.uvExePath());
+        if (Prerequisites.isSupportedUv(installed)) {
+            await this.refresh();
+            return { version: installed, exePath: this.uvExePath() };
+        }
+        try {
+            const result = await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: t('Installing uv')
+            }, (progress) => installUv({
+                binDir: this.binDir,
+                logger: this.log,
+                onProgress: (message) => progress.report({ message })
+            }));
+            vscode.window.showInformationMessage(t('uv {0} installed.', result.version));
+            await this.refresh();
+            return result;
+        } catch (error) {
+            this.log.error(`uv install failed: ${error.message}`);
+            vscode.window.showErrorMessage(`${t('uv installation failed.')}\n${error.message}`);
+            return undefined;
         }
     }
 

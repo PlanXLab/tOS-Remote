@@ -2,6 +2,31 @@
 
 **English** | [한국어](CHANGELOG.ko.md)
 
+## 0.3.0
+
+- **Board tools**: Installs `debugpy` and `jupyter_server` + `ipykernel` into the board's global Python environment from the panel (**Board Tools**) or commands when they are missing. Nothing is installed if they are already there.
+  - The board does not need internet access. Your PC resolves the packages for the board's Python version (3.x) and platform with uv, downloads them from PyPI (SHA-256 verified), copies them to a temporary folder on the board, and installs them with `sudo pip install`.
+  - Package versions already on the board are kept, and only the missing packages are downloaded.
+  - The sudo password is taken from the saved board password, or asked for when it is missing or not accepted.
+  - `/usr/local/bin/run_debug.sh` is created with execute permission if it does not exist.
+  - New setting `tosRemote.packageExcludeNewer`: install the versions available on a given date (identical versions on all boards in a class).
+  - uv is downloaded from PyPI and verified with SHA-256 the first time it is needed (shown in Prerequisites).
+- **Jupyter cells on the board**: Starts a Jupyter server on the board in the background (`127.0.0.1`, token), connects to it through SSH port forwarding, and registers it in the Jupyter extension's kernel picker as **tOS Remote**. `#%%` cells in Python files and notebooks run on the board.
+  - Start and stop, server log, automatic reconnection when the forwarding drops, and reconnection to a running server when the window opens again
+  - The server stops when you close the remote workspace; idle kernels and the server shut themselves down after an hour
+  - The status bar shows when the server is running
+- **Cleaner Run on tOS output**: The terminal no longer shows the ssh command line or the task messages (`Executing task ...`, `Terminal will be reused ...`, exit code messages); it shows only the program's output. Only a lost connection is reported in one line.
+- **Debugging**: If debugpy is not installed on the board, `F5` offers to install it and then starts debugging.
+- **Password authentication**: Remote debugging (F5), board tools, Jupyter, and Python library path detection now work with the saved password (an SSH_ASKPASS helper; the password is never put on a command line or in environment variables).
+- The Jupyter extension is added to the workspace's recommended extensions.
+
+## 0.2.1
+
+- Workspace path is now relative to the user's home directory: the panel shows `/home/<user>/` automatically from the user account, and you enter only the rest (default `Workspace`). Paths outside the home directory and `.`/`..` segments are rejected.
+- If the workspace folder does not exist, it is created on the board (including intermediate folders) when the workspace opens, with a clear message on permission errors.
+- Existing settings in the old absolute form (`/home/<user>/Workspace`) are converted automatically.
+- Development: `scripts/build-vsix.ps1` now creates `*-local.vsix` for local testing only (its manifest is not accepted by the Marketplace); Marketplace packages are built with `vsce`.
+
 ## 0.2.0
 
 - Renamed the extension: **tOS-Lite Remote → tOS Remote**

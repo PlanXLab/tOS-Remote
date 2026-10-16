@@ -147,6 +147,92 @@ async function installRclone(options) {
     }
 }
 
+// ---------------------------------------------------------------- uv (보드용 패키지 해석)
+
+const PYPI_JSON = 'https://pypi.org/pypi';
+
+function uvWheelTag() {
+    if (process.arch === 'arm64') {
+        return 'win_arm64';
+    }
+    return process.arch === 'ia32' ? 'win32' : 'win_amd64';
+}
+
+/** @returns {Promise<string|undefined>} uv 버전 (예: 0.13.0) */
+async function getUvVersion(exe) {
+    if (!exe || !fs.existsSync(exe)) {
+        return undefined;
+    }
+    try {
+        const result = await runProcess(exe, ['--version'], { timeoutMs: 15000 });
+        const match = /^uv (\d+\.\d+\.\d+)/m.exec(result.stdout);
+        return match ? match[1] : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+/**
+ * PyPI에서 최신 uv(Windows 휠)를 내려받아 SHA-256을 검증하고 uv.exe만 binDir에 설치한다.
+ * @returns {Promise<{version: string, exePath: string}>}
+ */
+async function installUv(options) {
+    const logger = options.logger || noopLogger;
+    const report = options.onProgress || (() => {});
+    const tag = uvWheelTag();
+
+    report(t('Checking the latest version...'));
+    const meta = JSON.parse(await downloadText(`${PYPI_JSON}/uv/json`));
+    const wheel = (meta.urls || []).find((file) => file.packagetype === 'bdist_wheel' && !file.yanked && file.filename.endsWith(`-py3-none-${tag}.whl`));
+    const expected = wheel && wheel.digests && wheel.digests.sha256;
+    if (!wheel || !/^[0-9a-f]{64}$/i.test(expected || '') || !/^https:\/\//.test(wheel.url)) {
+        throw new Error(t('Could not find a uv package for this PC ({0}).', tag));
+    }
+    const version = String(meta.info && meta.info.version);
+
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tos-remote-uv-'));
+    try {
+        const wheelPath = path.join(tempDir, 'uv.whl');
+        logger.info(`Downloading uv: ${wheel.url}`);
+        let lastPercent = -1;
+        const actual = await downloadFile(wheel.url, wheelPath, (received, total) => {
+            const percent = total ? Math.floor((received / total) * 100) : -1;
+            if (percent !== lastPercent && percent % 5 === 0) {
+                lastPercent = percent;
+                report(t('Downloading {0}... {1}%', `uv ${version}`, percent));
+            }
+        });
+        if (actual.toLowerCase() !== expected.toLowerCase()) {
+            throw new Error(t('uv file verification failed (SHA-256 mismatch). Please try again.'));
+        }
+
+        // 휠은 zip 형식이다. uv.exe는 uv-<버전>.data/scripts/에 있다.
+        report(t('Extracting...'));
+        const tar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
+        const result = await runProcess(fs.existsSync(tar) ? tar : 'tar.exe', ['-xf', wheelPath, '-C', tempDir], { timeoutMs: 120000 });
+        const dataDir = fs.readdirSync(tempDir).find((name) => /^uv-.*\.data$/.test(name));
+        const extracted = dataDir && path.join(tempDir, dataDir, 'scripts', 'uv.exe');
+        if (result.code !== 0 || !extracted || !fs.existsSync(extracted)) {
+            throw new Error(t('Extraction failed: {0}', result.stderr.trim() || `exit ${result.code}`));
+        }
+
+        fs.mkdirSync(options.binDir, { recursive: true });
+        const exePath = path.join(options.binDir, 'uv.exe');
+        const staged = `${exePath}.new`;
+        fs.copyFileSync(extracted, staged);
+        try {
+            fs.renameSync(staged, exePath);
+        } catch (error) {
+            fs.rmSync(staged, { force: true });
+            throw new Error(t('Cannot replace uv.exe (it may be in use). Try again in a moment. ({0})', error.code || error.message));
+        }
+        logger.info(`uv ${version} installed: ${exePath}`);
+        return { version, exePath };
+    } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+}
+
 function queryRegistry(key, value) {
     return new Promise((resolve) => {
         execFile('reg.exe', ['query', key, '/v', value], { windowsHide: true }, (error, stdout) => {
@@ -171,4 +257,4 @@ async function findWinFsp() {
     return undefined;
 }
 
-module.exports = { installRclone, getLatestRcloneVersion, findWinFsp, rcloneArch };
+module.exports = { installRclone, getLatestRcloneVersion, findWinFsp, rcloneArch, installUv, getUvVersion, downloadFile };

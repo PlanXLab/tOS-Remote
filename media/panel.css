@@ -167,6 +167,50 @@ input.invalid {
     border-color: var(--vscode-inputValidation-errorBorder, #be1100);
 }
 
+/* 고정 접두어(/home/<user>/) + 입력란 */
+.prefixed {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, transparent);
+    border-radius: 2px;
+}
+
+.prefixed:focus-within {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
+}
+
+.prefixed .prefix {
+    flex: none;
+    padding-left: 6px;
+    color: var(--vscode-descriptionForeground);
+    white-space: nowrap;
+    user-select: none;
+}
+
+.prefixed input {
+    flex: 1;
+    width: auto;
+    min-width: 0;
+    border: none;
+    background: transparent;
+    padding-left: 1px;
+}
+
+.prefixed input:focus {
+    outline: none;
+}
+
+.prefixed:has(input:disabled) {
+    opacity: 0.6;
+}
+
+.prefixed:has(input:disabled) input:disabled {
+    opacity: 1;
+}
+
 .hint {
     margin-top: 4px;
     min-height: 0;
@@ -208,6 +252,17 @@ input.invalid {
 
 .check button.link { margin-left: auto; }
 .check button.link + button.link { margin-left: 8px; }
+
+/* 한 줄에 버튼 여러 개 (일부만 표시될 때도 오른쪽 정렬 유지) */
+.check .inline-actions {
+    margin-left: auto;
+    display: flex;
+    gap: 8px;
+}
+
+.check .inline-actions button.link { margin-left: 0; }
+
+.check .dot { margin: 0 0.25em; }
 
 .tools {
     display: flex;

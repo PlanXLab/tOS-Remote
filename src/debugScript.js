@@ -4,12 +4,15 @@ const { shellQuote } = require('./util');
 
 const DEBUG_READY = 'TOS_DEBUG_READY';
 const DEBUG_FAILED = 'TOS_DEBUG_FAILED';
+const DEBUGPY_MISSING = 'TOS_DEBUGPY_MISSING';
 
 /** 보드에서 debugpy를 실행하고 포트가 열릴 때까지 기다리는 POSIX sh 스크립트 (ssh 'sh -s'의 stdin으로 전달) */
 function buildDebugScript({ remoteWorkspace, pythonCommand, relativePath, port }) {
     const hexPort = port.toString(16).toUpperCase().padStart(4, '0');
     return [
         `cd ${shellQuote(remoteWorkspace)} || { echo ${DEBUG_FAILED}; exit 1; }`,
+        // debugpy가 없으면 확장이 PC 경유 설치를 안내한다
+        `${pythonCommand} -c 'import debugpy' 2>/dev/null || { echo ${DEBUGPY_MISSING}; exit 1; }`,
         // 스크립트는 stdin으로 전달되므로 이 셸의 명령줄에는 debugpy가 없어 자기 자신은 종료되지 않는다
         'pkill -u "$(id -u)" -f debugpy 2>/dev/null',
         `listening() { grep -qiE ":${hexPort} [0-9A-F]+:0000 0A" /proc/net/tcp /proc/net/tcp6 2>/dev/null; }`,
@@ -28,4 +31,4 @@ function buildDebugScript({ remoteWorkspace, pythonCommand, relativePath, port }
     ].join('\n');
 }
 
-module.exports = { buildDebugScript, DEBUG_READY, DEBUG_FAILED };
+module.exports = { buildDebugScript, DEBUG_READY, DEBUG_FAILED, DEBUGPY_MISSING };

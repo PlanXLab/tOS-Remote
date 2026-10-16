@@ -1,14 +1,16 @@
 ﻿<#
 .SYNOPSIS
-    Node.js/vsce 없이 tOS-Lite Remote 확장 패키지(.vsix)를 만든다.
+    Node.js/vsce 없이 로컬 설치 테스트용 tOS Remote 패키지(*-local.vsix)를 만든다.
 
 .DESCRIPTION
-    package.json, README.md, CHANGELOG.md, LICENSE, src/, media/만 포함한다.
-    표준 도구로 패키징하려면 Node.js 설치 후 `npx @vscode/vsce package`를 사용한다.
+    Marketplace 업로드용이 아니다. Marketplace에는 반드시 공식 도구로 만든 패키지를 올린다:
+        npx @vscode/vsce package --out dist/      (또는 npx @vscode/vsce publish)
+    vsce는 README 상대 링크를 저장소 URL로 바꾸고 저장소·브랜딩 정보를 매니페스트에 넣는 등
+    이 스크립트가 하지 않는 처리를 한다. 혼동을 막기 위해 출력 파일 이름에 -local을 붙인다.
 
 .EXAMPLE
     .\scripts\build-vsix.ps1
-    code --install-extension .\dist\tos-lite-remote-0.1.0.vsix
+    code --install-extension .\dist\tos-remote-0.3.0-local.vsix
 #>
 param(
     [string]$OutDir
@@ -45,8 +47,10 @@ foreach ($dir in @('src', 'media', 'l10n')) {
 $assets = @('<Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true" />')
 if ($files.Contains('README.md')) { $assets += '<Asset Type="Microsoft.VisualStudio.Services.Content.Details" Path="extension/README.md" Addressable="true" />' }
 if ($files.Contains('CHANGELOG.md')) { $assets += '<Asset Type="Microsoft.VisualStudio.Services.Content.Changelog" Path="extension/CHANGELOG.md" Addressable="true" />' }
+# 패키지 안의 경로(확장자 없는 LICENSE는 vsce처럼 LICENSE.txt로 넣는다)
+function EntryName([string]$file) { if ($file -eq 'LICENSE') { 'LICENSE.txt' } else { $file } }
 $license = $files | Where-Object { $_ -like 'LICENSE*' } | Select-Object -First 1
-if ($license) { $assets += "<Asset Type=`"Microsoft.VisualStudio.Services.Content.License`" Path=`"extension/$license`" Addressable=`"true`" />" }
+if ($license) { $assets += "<Asset Type=`"Microsoft.VisualStudio.Services.Content.License`" Path=`"extension/$(EntryName $license)`" Addressable=`"true`" />" }
 
 $manifest = @"
 <?xml version="1.0" encoding="utf-8"?>
@@ -73,11 +77,11 @@ $manifest = @"
 </PackageManifest>
 "@
 if ($package.icon) {
-    $manifest = $manifest.Replace('    <GalleryFlags>Public</GalleryFlags>', "    <GalleryFlags>Public</GalleryFlags>`n    <Icon>extension/$($package.icon)</Icon>")
+    $manifest = $manifest.Replace('    </Properties>', "    </Properties>`n    <Icon>extension/$($package.icon)</Icon>")
     $manifest = $manifest.Replace('  </Assets>', "    <Asset Type=`"Microsoft.VisualStudio.Services.Icons.Default`" Path=`"extension/$($package.icon)`" Addressable=`"true`" />`n  </Assets>")
 }
 if ($license) {
-    $manifest = $manifest.Replace('    <GalleryFlags>Public</GalleryFlags>', "    <GalleryFlags>Public</GalleryFlags>`n    <License>extension/$license</License>")
+    $manifest = $manifest.Replace('    </Properties>', "    </Properties>`n    <License>extension/$(EntryName $license)</License>")
 }
 
 $contentTypes = '<?xml version="1.0" encoding="utf-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
@@ -89,11 +93,10 @@ $contentTypes = '<?xml version="1.0" encoding="utf-8"?><Types xmlns="http://sche
     '<Default Extension=".png" ContentType="image/png"/>' +
     '<Default Extension=".txt" ContentType="text/plain"/>' +
     '<Default Extension=".vsixmanifest" ContentType="text/xml"/>' +
-    '<Default Extension="" ContentType="text/plain"/>' +
     '</Types>'
 
 New-Item -ItemType Directory -Force $OutDir | Out-Null
-$vsix = Join-Path $OutDir "$($package.name)-$($package.version).vsix"
+$vsix = Join-Path $OutDir "$($package.name)-$($package.version)-local.vsix"
 if (Test-Path $vsix) { Remove-Item $vsix -Force }
 
 $zip = [IO.Compression.ZipFile]::Open($vsix, [IO.Compression.ZipArchiveMode]::Create)
@@ -106,10 +109,11 @@ try {
     & $write '[Content_Types].xml' $enc.GetBytes($contentTypes)
     & $write 'extension.vsixmanifest' $enc.GetBytes($manifest)
     foreach ($file in $files) {
-        & $write "extension/$file" ([IO.File]::ReadAllBytes((Join-Path $ExtDir $file)))
+        & $write "extension/$(EntryName $file)" ([IO.File]::ReadAllBytes((Join-Path $ExtDir $file)))
     }
 } finally {
     $zip.Dispose()
 }
 
 Write-Host "Created: $vsix ($($files.Count) files, $([int]((Get-Item $vsix).Length / 1KB)) KB)" -ForegroundColor Green
+Write-Host 'For local install testing only. For the Marketplace, use: npx @vscode/vsce package --out dist/' -ForegroundColor Yellow

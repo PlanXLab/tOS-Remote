@@ -70,7 +70,7 @@ function buildWorkspace(options) {
             ]
         },
         extensions: {
-            recommendations: ['ms-python.python', 'ms-python.debugpy']
+            recommendations: ['ms-python.python', 'ms-python.debugpy', 'ms-toolsai.jupyter']
         }
     };
 }

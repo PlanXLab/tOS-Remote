@@ -74,4 +74,34 @@ function buildSshTerminalScript(sshPath, sshArgs) {
     ].join('\r\n');
 }
 
-module.exports = { buildSshTerminalScript, quoteWindowsArg, echoLine };
+/**
+ * "tOS에서 실행" 작업용 배치 파일 (내용이 고정되어 사용자 경로·파일 이름이 들어가지 않는다).
+ * - ssh 경로와 인자는 환경 변수 TOS_SSH_EXE, TOS_SSH_ARGS로 받아 지연 확장(!VAR!)으로 실행한다.
+ *   확장된 값은 배치 구문으로 다시 해석되지 않으므로 & % ^ ! " 같은 문자가 그대로 전달된다.
+ * - 항상 0으로 끝내 VS Code가 ssh 명령줄이 담긴 종료 메시지를 표시하지 않게 한다. 연결 실패(255)만 짧게 안내한다.
+ * - 프로그램이 다시 실행되지 않도록 재시도하지 않는다.
+ */
+function buildRunScript() {
+    return [
+        '@echo off',
+        'chcp 65001 >nul',
+        'setlocal EnableDelayedExpansion',
+        '!TOS_SSH_EXE! !TOS_SSH_ARGS!',
+        'endlocal & set TOS_EXIT=%errorlevel%',
+        'if not "%TOS_EXIT%"=="255" exit /b 0',
+        'echo.',
+        echoLine(`[tOS] ${t('The connection to the board failed or was lost (ssh exit code 255).')}`),
+        'exit /b 0',
+        ''
+    ].join('\r\n');
+}
+
+/** 실행 배치 파일에 넘길 환경 변수 */
+function runScriptEnv(sshPath, sshArgs) {
+    return {
+        TOS_SSH_EXE: quoteWindowsArg(sshPath),
+        TOS_SSH_ARGS: sshArgs.map(quoteWindowsArg).join(' ')
+    };
+}
+
+module.exports = { buildSshTerminalScript, buildRunScript, runScriptEnv, quoteWindowsArg, echoLine };

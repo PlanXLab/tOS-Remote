@@ -21,7 +21,14 @@ const ALLOWED_COMMANDS = new Set([
     'tosRemote.openSettings',
     'tosRemote.openWalkthrough',
     'tosRemote.installRclone',
-    'tosRemote.installWinFsp'
+    'tosRemote.installWinFsp',
+    'tosRemote.installUv',
+    'tosRemote.checkBoardTools',
+    'tosRemote.installDebugTools',
+    'tosRemote.installJupyter',
+    'tosRemote.startJupyter',
+    'tosRemote.stopJupyter',
+    'tosRemote.showJupyterLog'
 ]);
 
 function escapeHtml(text) {
@@ -60,7 +67,26 @@ function webviewStrings() {
         readyChecking: t('✓ Ready (checking...)'),
         checking: t('Checking...'),
         ready: t('✓ Ready'),
-        needsAttention: t('⚠ Needs attention')
+        needsAttention: t('⚠ Needs attention'),
+        uvInstalled: t('uv v{0} (board package resolution)'),
+        uvNotInstalled: t('uv (downloaded when installing board packages)'),
+        toolsUnavailable: t('Open the remote workspace in this window to check the board tools.'),
+        toolsNotChecked: t('Not checked yet'),
+        toolsError: t('Check failed: {0}'),
+        toolsInstalling: t('Installing...'),
+        pythonInfo: t('Python {0} · {1} · {2}'),
+        debugReady: t('Debugging: debugpy {0}'),
+        debugMissing: t('Debugging: debugpy not installed'),
+        debugNoScript: t('Debugging: debugpy {0} (run_debug.sh missing)'),
+        jupyterReady: t('Jupyter: jupyter_server {0}, ipykernel {1}'),
+        jupyterMissing: t('Jupyter: not installed'),
+        jupyterStopped: t('Jupyter server stopped'),
+        jupyterStarting: t('Starting the Jupyter server...'),
+        jupyterRunning: t('Jupyter server running (PC port {0})'),
+        jupyterReconnecting: t('Reconnecting to the Jupyter server...'),
+        jupyterStopping: t('Stopping the Jupyter server...'),
+        jupyterHint: t('To run cells on the board, choose "tOS Remote" in Select Kernel.'),
+        jupyterExtensionMissing: t('Install the Jupyter extension (ms-toolsai.jupyter) to run cells.')
     };
 }
 
@@ -86,6 +112,7 @@ class PanelProvider {
         view.onDidChangeVisibility(() => {
             if (view.visible) {
                 this.services.prereq.refresh().catch(() => {});
+                this.checkBoardToolsOnce();
                 this.postState();
             }
         });
@@ -94,11 +121,21 @@ class PanelProvider {
         });
     }
 
+    // 패널이 보일 때 아직 보드 도구를 확인하지 않았으면 한 번 확인한다 (원격 작업 공간 창에서만)
+    checkBoardToolsOnce() {
+        const tools = this.services.boardTools;
+        const status = tools.status();
+        if (status.available && !status.checked && !status.checking && !status.error) {
+            tools.check().catch(() => {});
+        }
+    }
+
     async onMessage(message) {
         if (!message || typeof message !== 'object') {
             return;
         }
         if (message.type === 'ready') {
+            this.checkBoardToolsOnce();
             await this.postState();
         } else if (message.type === 'setting') {
             try {
@@ -116,7 +153,7 @@ class PanelProvider {
         if (!this.view) {
             return;
         }
-        const { sessionMgr, prereq, auth } = this.services;
+        const { sessionMgr, prereq, auth, boardTools, jupyter } = this.services;
         const settings = getSettings();
         const target = targetOf(settings);
         const status = sessionMgr.status || {};
@@ -126,7 +163,7 @@ class PanelProvider {
                 host: settings.host,
                 port: settings.port,
                 user: settings.user,
-                remoteWorkspace: settings.remoteWorkspace,
+                remoteWorkspace: settings.workspaceFolder,
                 driveLetter: settings.driveLetter
             },
             phase: status.phase || 'idle',
@@ -146,8 +183,11 @@ class PanelProvider {
                 winfsp: !!prereq.state.winfsp,
                 ssh: !!prereq.state.ssh,
                 rcloneVersion: prereq.state.rcloneVersion,
-                customRclone: !!settings.rclonePath
+                customRclone: !!settings.rclonePath,
+                uvVersion: prereq.state.uvVersion
             },
+            tools: boardTools.status(),
+            jupyter: jupyter.status(),
             auth: {
                 keyFile: settings.host ? findExistingKey(settings.identityFile) : undefined,
                 keyOk: settings.host ? auth.wasKeyOk(target) : false,
@@ -202,7 +242,10 @@ class PanelProvider {
         <label for="user">${h(t('User'))}</label>
         <input id="user" data-setting="user" type="text" spellcheck="false" placeholder="tos">
         <label for="remoteWorkspace">${h(t('Workspace'))}</label>
-        <input id="remoteWorkspace" data-setting="remoteWorkspace" type="text" spellcheck="false" placeholder="/home/tos/Workspace">
+        <div class="prefixed" title="${h(t('Folder under your home directory. Created on the board if it does not exist.'))}">
+            <span class="prefix" id="workspacePrefix">/home/tos/</span>
+            <input id="remoteWorkspace" data-setting="remoteWorkspace" type="text" spellcheck="false" placeholder="Workspace">
+        </div>
         <label for="driveLetter">${h(t('Drive'))}</label>
         <select id="driveLetter" data-setting="driveLetter"><option value="">${h(t('Auto'))}</option>${drives}</select>
     </div>
@@ -232,6 +275,30 @@ class PanelProvider {
         <div class="check"><span class="mark" id="rcloneMark"></span><span id="rcloneText">rclone</span>
             <button class="link" id="btnRclone" data-command="tosRemote.installRclone">${h(t('Download'))}</button></div>
         <div class="check"><span class="mark" id="sshMark"></span><span>${h(t('OpenSSH Client'))}</span></div>
+        <div class="check"><span class="mark" id="uvMark"></span><span id="uvText">uv</span>
+            <button class="link" id="btnUv" data-command="tosRemote.installUv">${h(t('Download'))}</button></div>
+    </div>
+</details>
+
+<details open id="toolsSection">
+    <summary>${h(t('Board Tools'))} <span class="summary-badge" id="toolsBadge"></span></summary>
+    <div class="hint" id="toolsHint"></div>
+    <div class="check-list" id="toolsList">
+        <div class="check"><span class="mark" id="pythonMark"></span><span id="pythonText">Python</span></div>
+        <div class="check"><span class="mark" id="debugMark"></span><span id="debugText"></span>
+            <button class="link" id="btnInstallDebug" data-command="tosRemote.installDebugTools">${h(t('Install'))}</button></div>
+        <div class="check"><span class="mark" id="jupyterMark"></span><span id="jupyterText"></span>
+            <button class="link" id="btnInstallJupyter" data-command="tosRemote.installJupyter">${h(t('Install'))}</button></div>
+        <div class="check" id="jupyterServerRow"><span class="dot" id="jupyterDot"></span><span id="jupyterServerText"></span>
+            <span class="inline-actions">
+                <button class="link" id="btnJupyterStart" data-command="tosRemote.startJupyter">${h(t('Start'))}</button>
+                <button class="link" id="btnJupyterStop" data-command="tosRemote.stopJupyter">${h(t('Stop'))}</button>
+            </span></div>
+    </div>
+    <div class="hint" id="jupyterHint"></div>
+    <div class="row">
+        <button class="link" id="btnToolsCheck" data-command="tosRemote.checkBoardTools">${h(t('Check Again'))}</button>
+        <button class="link" id="btnJupyterLog" data-command="tosRemote.showJupyterLog">${h(t('Jupyter Log'))}</button>
     </div>
 </details>
 

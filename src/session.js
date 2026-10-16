@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const vscode = require('vscode');
 const {
-    readJson, writeJson, removeFile, isProcessAlive, samePath, sleep, probeTcp, normalizeDriveLetter
+    readJson, writeJson, removeFile, isProcessAlive, samePath, sleep, probeTcp, normalizeDriveLetter, writeIfChanged
 } = require('./util');
 const { sftpConnectionString } = require('./rclone');
 const { buildWorkspace, sshTerminalArgs } = require('./workspaceFile');
@@ -21,20 +21,6 @@ const STATUS_INTERVAL_MS = 5000;
 const WATCHDOG_INTERVAL_MS = 15000;
 const AUTO_RELOAD_GUARD_MS = 60000;
 const LIBRARY_SYNC_DELAY_MS = 15000;
-
-// 내용이 바뀐 경우에만 쓴다 (작업 공간 파일을 다시 쓰면 VS Code가 설정을 다시 읽는다)
-function writeIfChanged(file, content) {
-    let current;
-    try {
-        current = fs.readFileSync(file, 'utf8');
-    } catch {
-        current = undefined;
-    }
-    if (current !== content) {
-        fs.mkdirSync(path.dirname(file), { recursive: true });
-        fs.writeFileSync(file, content, 'utf8');
-    }
-}
 
 function busyLabel(phase) {
     switch (phase) {
@@ -80,6 +66,17 @@ class SessionManager {
     writeSession(session) {
         writeJson(this.sessionFile, session);
         this.cachedSession = session;
+    }
+
+    /** 현재 세션의 일부 항목만 바꾼다. identity를 주면 같은 보드 세션일 때만 바꾼다. */
+    updateSession(patch, identity) {
+        const current = this.readSession();
+        if (!current || (identity && current.identity !== identity)) {
+            return undefined;
+        }
+        const next = { ...current, ...patch };
+        this.writeSession(next);
+        return next;
     }
 
     clearSession() {
@@ -257,7 +254,7 @@ class SessionManager {
     async suggestKeySetup() {
         const register = t('Register SSH Key');
         const pick = await vscode.window.showInformationMessage(
-            t('Connected with a password. Register an SSH key to use the terminal without a password and to enable remote debugging (F5).'),
+            t('Connected with a password. Register an SSH key to open the terminal and run programs without entering the password.'),
             register
         );
         if (pick === register) {
@@ -365,11 +362,22 @@ class SessionManager {
         const fsString = sftpConnectionString(target, auth, settings.remoteWorkspace);
         report(t('Checking the remote workspace'));
         try {
+            // 작업 공간 폴더가 없으면 홈(/home/<user>) 아래에 만든다 (중간 폴더 포함)
+            const exists = await this.rclone.dirExists(sftpConnectionString(target, auth, settings.homeDir), settings.workspaceFolder);
+            if (exists === false) {
+                report(t('Creating the remote workspace {0}', settings.remoteWorkspace));
+            }
             await this.rclone.mkdir(fsString);
+            if (exists === false) {
+                this.log.info(`Created remote workspace: ${settings.remoteWorkspace}`);
+            }
         } catch (error) {
             if (auth.type === 'password' && isAuthError(error.message)) {
                 await this.auth.clearPassword(target);
                 throw new Error(t('The password is incorrect. Please try again.'));
+            }
+            if (/permission denied/i.test(error.message)) {
+                throw new Error(t('Could not create the remote workspace {0}: permission denied.', settings.remoteWorkspace));
             }
             throw error;
         }
@@ -391,7 +399,8 @@ class SessionManager {
             this.log.info(`Mounted ${identity} → ${drive}`);
         }
 
-        const { libraries, aliases } = await this.resolveLibraries(settings, target, auth, previous, sameIdentity, options, report);
+        const { libraries, aliases, tools } = await this.resolveLibraries(settings, target, auth, previous, sameIdentity, options, report);
+        const kept = sameIdentity && previous ? previous : {};
 
         const session = {
             state: 'open',
@@ -407,6 +416,9 @@ class SessionManager {
             debugPort: settings.debugPort,
             libraries,
             libraryAliases: aliases,
+            // 보드 도구(debugpy·Jupyter) 확인 결과와 실행 중인 Jupyter 서버 정보는 같은 보드로 다시 연결해도 유지한다
+            boardTools: tools ? { probe: tools, checkedAt: Date.now() } : kept.boardTools,
+            jupyter: kept.jupyter,
             openedAt: Date.now()
         };
         this.writeWorkspaceFile(session);
@@ -426,9 +438,11 @@ class SessionManager {
         if (options.quick && previousLibraries.length) {
             return { libraries: previousLibraries, aliases: previous.libraryAliases || [] };
         }
-        if (auth.type === 'key') {
+        const password = auth.type === 'key' ? undefined : await this.auth.getPassword(target);
+        const sshAuth = auth.type === 'key' ? { keyPath: auth.keyPath } : password ? { password } : undefined;
+        if (sshAuth) {
             report(t('Detecting Python library paths'));
-            const detected = await pyLibs.detectRemoteLibraries(this.ssh, target, auth.keyPath, settings.pythonCommand, settings.remoteWorkspace, this.log);
+            const detected = await pyLibs.detectRemoteLibraries(this.ssh, target, sshAuth, settings.pythonCommand, settings.remoteWorkspace, this.log);
             if (detected) {
                 return detected;
             }
@@ -671,6 +685,26 @@ class SessionManager {
     }
 
     /**
+     * 화면 없이 실행하는 ssh(원격 명령·디버그·Jupyter)용 인증. 키 인증이 아니면 저장된 비밀번호를 SSH_ASKPASS로 넘긴다.
+     * @param {{interactive?: boolean}} options interactive면 저장된 비밀번호가 없을 때 입력받는다
+     * @returns {Promise<{keyPath: string} | {password: string}>}
+     */
+    async sshAuth(session, options = {}) {
+        if (session.authType === 'key' && session.keyPath) {
+            return { keyPath: session.keyPath };
+        }
+        const target = { host: session.host, port: session.port, user: session.user };
+        let password = await this.auth.getPassword(target);
+        if (!password && options.interactive) {
+            password = await this.auth.promptPassword(target);
+        }
+        if (!password) {
+            throw new Error(t('No password is saved. Save the board password in the panel or register an SSH key.'));
+        }
+        return { password };
+    }
+
+    /**
      * @param {{remote: string, kind: string}[]|undefined} libraries 동기화할 라이브러리. 비우면(수동 동기화) 보드에서 다시 감지해 전체를 동기화한다.
      * @param {boolean} notify 완료 알림 표시 여부 (수동 동기화)
      * 필수 경로(전역·사용자 지정)의 실패만 알림창으로 표시하고, 선택 경로(~/.local·가상 환경)는 없거나 실패해도 로그만 남긴다.
@@ -697,15 +731,22 @@ class SessionManager {
             const auth = await this.resolveSessionAuth(session);
 
             // 수동 동기화: 작업 중 새로 만든 가상 환경(uv venv 등)을 반영하기 위해 경로를 다시 감지한다
-            if (!libraries && session.authType === 'key' && !getSettings().pythonLibraryPaths.length) {
-                const detected = await pyLibs.detectRemoteLibraries(this.ssh, target, session.keyPath, session.pythonCommand || 'python3', session.remoteWorkspace, this.log);
-                if (detected) {
-                    session = { ...session, libraries: detected.libraries, libraryAliases: detected.aliases };
+            if (!libraries && !getSettings().pythonLibraryPaths.length) {
+                const sshAuth = await this.sshAuth(session).catch(() => undefined);
+                const detected = sshAuth
+                    && await pyLibs.detectRemoteLibraries(this.ssh, target, sshAuth, session.pythonCommand || 'python3', session.remoteWorkspace, this.log);
+                const current = this.readSession();
+                if (detected && current && current.identity === session.identity) {
+                    session = { ...current, libraries: detected.libraries, libraryAliases: detected.aliases };
+                    if (detected.tools) {
+                        session.boardTools = { probe: detected.tools, checkedAt: Date.now() };
+                    }
                     delete session.libraryPaths;
                     this.writeSession(session);
                     if (this.isOwnerWindow()) {
                         this.writeWorkspaceFile(session);
                     }
+                    this.emitter.fire({ ...this.status, session, libSyncRunning: true });
                 }
             }
             const targets = libraries || pyLibs.sessionLibraries(session);

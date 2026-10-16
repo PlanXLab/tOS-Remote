@@ -21,11 +21,20 @@ class StatusBar {
         this.item.name = 'tOS Remote';
         this.item.command = 'tosRemote.showMenu';
         this.phases = phases();
+        this.jupyter = 'stopped';
+        this.status = { phase: 'idle' };
         this.item.show();
         this.update({ phase: 'idle' });
     }
 
+    /** 보드 Jupyter 서버 상태 (실행 중이면 노트북 아이콘 표시) */
+    setJupyter(phase) {
+        this.jupyter = phase || 'stopped';
+        this.update(this.status);
+    }
+
     update(status) {
+        this.status = status;
         const phase = this.phases[status.phase] || this.phases.idle;
         const session = status.session;
         let text = phase.text;
@@ -35,9 +44,13 @@ class StatusBar {
         if (status.pendingUploads > 0) {
             text += ` $(cloud-upload) ${status.pendingUploads}`;
         }
+        if (status.phase === 'open' && this.jupyter !== 'stopped') {
+            text += this.jupyter === 'running' ? ' $(notebook)' : ' $(sync~spin)';
+        }
         this.item.text = `${phase.icon} ${text}`;
         const details = session ? `\n\n${session.user}@${session.host}\n${session.remoteWorkspace} → ${session.drive}` : '';
-        this.item.tooltip = `${phase.tooltip}${details}`;
+        const jupyter = status.phase === 'open' && this.jupyter === 'running' ? `\n${t('Jupyter: running on the board')}` : '';
+        this.item.tooltip = `${phase.tooltip}${details}${jupyter}`;
         this.item.backgroundColor = phase.warning
             ? new vscode.ThemeColor('statusBarItem.warningBackground')
             : phase.active ? new vscode.ThemeColor('statusBarItem.remoteBackground') : undefined;

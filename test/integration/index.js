@@ -89,7 +89,22 @@ async function run() {
         await config.update('host', '127.0.0.1', vscode.ConfigurationTarget.Global);
         await config.update('port', port, vscode.ConfigurationTarget.Global);
         await config.update('user', 'tos', vscode.ConfigurationTarget.Global);
-        await config.update('remoteWorkspace', '/home/tos/Workspace', vscode.ConfigurationTarget.Global);
+
+        await step('작업 공간 설정: 이전 절대 경로 변환·홈 밖 경로 거부·패널 입력', async () => {
+            const { migrateSettings, updateSetting, validateSettings } = require('../../src/settings');
+            await config.update('remoteWorkspace', '/home/tos/Workspace', vscode.ConfigurationTarget.Global);
+            await migrateSettings();
+            assert.strictEqual(vscode.workspace.getConfiguration('tosRemote').get('remoteWorkspace'), 'Workspace');
+            await assert.rejects(updateSetting('remoteWorkspace', '/etc/work'));
+            await updateSetting('remoteWorkspace', '/home/tos/class/vision');
+            assert.strictEqual(vscode.workspace.getConfiguration('tosRemote').get('remoteWorkspace'), 'class/vision');
+            await config.update('remoteWorkspace', '../x', vscode.ConfigurationTarget.Global);
+            assert.ok(validateSettings(getSettings()), 'invalid workspace must not validate');
+            await updateSetting('remoteWorkspace', 'Workspace');
+            const s = getSettings();
+            assert.deepStrictEqual([s.workspaceFolder, s.remoteWorkspace], ['Workspace', '/home/tos/Workspace']);
+            return `${s.workspaceFolder} → ${s.remoteWorkspace}`;
+        });
         const target = targetOf(getSettings());
 
         await step('비밀번호 인증 확인 (틀린/맞는 비밀번호)', async () => {
@@ -100,9 +115,11 @@ async function run() {
             await api.auth.storePassword(target, 'secret');
         });
 
-        const session = await step('연결 (데몬·작업 공간 생성·마운트·작업 공간 파일)', async () => {
+        const session = await step('연결 (데몬·없는 작업 공간 생성·마운트·작업 공간 파일)', async () => {
+            assert.ok(!fs.existsSync(path.join(serveDir, 'home')), 'serve dir must start empty');
             const s = await api.sessionMgr.connect(getSettings(), undefined, { report() {} }, { interactive: false });
             assert.strictEqual(s.authType, 'password');
+            assert.strictEqual(s.remoteWorkspace, '/home/tos/Workspace');
             assert.ok(fs.existsSync(path.join(serveDir, 'home', 'tos', 'Workspace')), 'remote workspace not created');
             assert.ok(fs.existsSync(`${s.drive}\\`), 'drive not mounted');
             const ws = JSON.parse(fs.readFileSync(api.sessionMgr.workspaceFile, 'utf8'));
@@ -374,21 +391,37 @@ async function runPhase2() {
             return name;
         });
 
+        await step('[2단계] 실행 작업은 명령줄을 숨긴다 (cmd 배치 + 환경 변수, echo 끔)', async () => {
+            const script = path.join(api.sessionMgr.storageDir, 'run-on-tos.cmd');
+            const content = fs.readFileSync(script, 'utf8');
+            assert.ok(content.includes('!TOS_SSH_EXE! !TOS_SSH_ARGS!'), 'run script must take ssh from environment variables');
+            assert.ok(!/ssh\.exe/i.test(content), 'run script must not contain the ssh command line');
+        });
+
         await step('[2단계] Run 버튼 메뉴 "Run on tOS" (tosRemote.runFile)', async () => {
             await vscode.commands.executeCommand('tosRemote.runFile', vscode.Uri.file(`${session.drive}\\vision\\infer.py`));
             assert.strictEqual(await waitRunTask(), 'Run on tOS: vision/infer.py');
         });
 
-        await step('[2단계] Run 버튼 메뉴 "Debug on tOS" → 비밀번호 인증이면 시작하지 않음', async () => {
+        await step('[2단계] Run 버튼 메뉴 "Debug on tOS" → Python Debugger 확장이 없으면 시작하지 않음', async () => {
             const started = await vscode.commands.executeCommand('tosRemote.debugFile', vscode.Uri.file(`${session.drive}\\vision\\infer.py`));
             assert.strictEqual(started, false);
             assert.strictEqual(vscode.debug.activeDebugSession, undefined);
         });
 
-        await step('[2단계] F5(디버그) → 비밀번호 인증이면 시작하지 않음', async () => {
+        await step('[2단계] F5(디버그) → Python Debugger 확장이 없으면 시작하지 않음', async () => {
             const started = await vscode.debug.startDebugging(folder, { type: 'tos-remote', request: 'launch', name: 'it', program: `${session.drive}\\vision\\infer.py` });
             assert.strictEqual(started, false);
             assert.strictEqual(vscode.debug.activeDebugSession, undefined);
+        });
+
+        await step('[2단계] 보드 도구·Jupyter 명령 등록과 초기 상태', async () => {
+            const all = await vscode.commands.getCommands(true);
+            const expected = ['tosRemote.checkBoardTools', 'tosRemote.installDebugTools', 'tosRemote.installJupyter', 'tosRemote.startJupyter',
+                'tosRemote.stopJupyter', 'tosRemote.showJupyterLog', 'tosRemote.installUv'];
+            assert.deepStrictEqual(expected.filter((id) => !all.includes(id)), []);
+            assert.strictEqual(api.boardTools.status().available, true);
+            assert.strictEqual(api.jupyter.status().phase, 'stopped');
         });
 
         await step('[2단계] 닫기 마무리 (마운트 해제·데몬 종료)', async () => {

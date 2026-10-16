@@ -32,6 +32,48 @@ function normalizeDriveLetter(value) {
     return match ? `${match[1].toUpperCase()}:` : '';
 }
 
+// 보드 사용자의 홈 디렉터리. 작업 공간은 홈 아래에만 만들 수 있다(권한).
+function homeDirOf(user) {
+    const name = String(user || '').trim();
+    return name === 'root' ? '/root' : `/home/${name}`;
+}
+
+/**
+ * 작업 공간 설정값을 홈 기준 상대 경로로 정규화한다.
+ * 이전 형식(/home/<user>/Workspace)과 ~/Workspace도 받아들인다.
+ * @returns {{folder: string, error?: 'empty'|'outside'|'invalid'}}
+ */
+function normalizeWorkspaceFolder(value, user) {
+    let text = String(value || '').trim().replace(/\\/g, '/');
+    const home = homeDirOf(user);
+    if (text === '~') {
+        text = '';
+    } else if (text.startsWith('~/')) {
+        text = text.slice(2);
+    } else if (text.startsWith('/')) {
+        const absolute = normalizeRemotePath(text);
+        if (absolute === home) {
+            text = '';
+        } else if (absolute.startsWith(`${home}/`)) {
+            text = absolute.slice(home.length + 1);
+        } else {
+            return { folder: '', error: 'outside' };
+        }
+    }
+    const segments = text.split('/').filter(Boolean);
+    if (segments.some((segment) => segment === '.' || segment === '..')) {
+        return { folder: '', error: 'invalid' };
+    }
+    if (segments.length === 0) {
+        return { folder: '', error: 'empty' };
+    }
+    return { folder: segments.join('/') };
+}
+
+function workspacePathOf(user, folder) {
+    return `${homeDirOf(user)}/${folder}`;
+}
+
 function samePath(a, b) {
     if (!a || !b) {
         return false;
@@ -206,12 +248,29 @@ function lastLine(text) {
     return lines.length ? lines[lines.length - 1] : '';
 }
 
+// 내용이 바뀐 경우에만 쓴다 (작업 공간 파일을 다시 쓰면 VS Code가 설정을 다시 읽는다)
+function writeIfChanged(file, content) {
+    let current;
+    try {
+        current = fs.readFileSync(file, 'utf8');
+    } catch {
+        current = undefined;
+    }
+    if (current !== content) {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content, 'utf8');
+    }
+}
+
 module.exports = {
     noopLogger,
     sleep,
     shellQuote,
     normalizeRemotePath,
     normalizeDriveLetter,
+    homeDirOf,
+    normalizeWorkspaceFolder,
+    workspacePathOf,
     samePath,
     readJson,
     writeJson,
@@ -223,5 +282,6 @@ module.exports = {
     probeTcp,
     runProcess,
     findExecutable,
-    lastLine
+    lastLine,
+    writeIfChanged
 };

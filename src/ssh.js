@@ -3,6 +3,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawn } = require('child_process');
 const { runProcess, findExecutable, removeFile, noopLogger } = require('./util');
 const { t } = require('./i18n');
 
@@ -40,11 +41,13 @@ function keyPathForCreation(identityFile) {
 
 class SshClient {
     /**
-     * @param {{knownHostsFile: string, logger?: object}} options
+     * @param {{knownHostsFile: string, logger?: object, askpass?: import('./askpass').AskpassBroker}} options
      */
     constructor(options) {
         this.knownHostsFile = options.knownHostsFile;
         this.logger = options.logger || noopLogger;
+        // 비밀번호 인증(SSH_ASKPASS)용. 없으면 키 인증만 사용할 수 있다.
+        this.askpass = options.askpass;
     }
 
     get sshPath() {
@@ -82,13 +85,81 @@ class SshClient {
         return args;
     }
 
+    /**
+     * 화면 없이 실행하는 ssh의 인증 인자와 환경 변수.
+     * 키는 BatchMode로, 비밀번호는 SSH_ASKPASS 도우미로 전달한다(명령줄에 넣지 않는다).
+     * @param {{keyPath?: string, password?: string}} auth
+     * @returns {Promise<{args: string[], env: NodeJS.ProcessEnv|undefined, dispose: () => void}>}
+     */
+    async authOptions(auth = {}) {
+        if (typeof auth.password === 'string') {
+            if (!this.askpass) {
+                throw new Error(t('Password authentication is not available. Register an SSH key.'));
+            }
+            const session = await this.askpass.open(auth.password);
+            return {
+                args: [
+                    '-o', 'BatchMode=no',
+                    '-o', 'PubkeyAuthentication=no',
+                    '-o', 'PreferredAuthentications=password,keyboard-interactive',
+                    '-o', 'NumberOfPasswordPrompts=1'
+                ],
+                env: { ...process.env, ...session.env },
+                dispose: session.dispose
+            };
+        }
+        const args = auth.keyPath ? ['-i', auth.keyPath, '-o', 'IdentitiesOnly=yes'] : [];
+        return { args: [...args, '-o', 'BatchMode=yes'], env: undefined, dispose() {} };
+    }
+
+    /**
+     * 원격 명령을 실행하고 끝날 때까지 기다린다.
+     * @param {{keyPath?: string, password?: string, input?: string, timeoutMs?: number,
+     *          onStdout?: (text: string) => void, onStderr?: (text: string) => void}} options
+     */
     async exec(target, command, options = {}) {
         const ssh = this.sshPath;
         if (!ssh) {
             throw new Error(t('ssh.exe (OpenSSH client) was not found.'));
         }
-        const args = [...this.baseArgs(target, { keyPath: options.keyPath, batch: true }), this.destination(target), command];
-        return runProcess(ssh, args, { input: options.input, timeoutMs: options.timeoutMs || 30000 });
+        const auth = await this.authOptions(options);
+        try {
+            const args = [...this.baseArgs(target), ...auth.args, this.destination(target), command];
+            return await runProcess(ssh, args, {
+                input: options.input,
+                timeoutMs: options.timeoutMs || 30000,
+                env: auth.env,
+                onStdout: options.onStdout,
+                onStderr: options.onStderr
+            });
+        } finally {
+            auth.dispose();
+        }
+    }
+
+    /**
+     * 오래 실행되는 ssh 프로세스(원격 디버그·포트 포워딩)를 숨김 창으로 시작한다.
+     * @param {string[]} remoteArgs 대상 뒤에 붙일 인자 (원격 명령)
+     * @param {{keyPath?: string, password?: string, sshArgs?: string[]}} options sshArgs: 대상 앞에 붙일 추가 ssh 인자
+     * @returns {Promise<import('child_process').ChildProcess>}
+     */
+    async spawn(target, remoteArgs, options = {}) {
+        const ssh = this.sshPath;
+        if (!ssh) {
+            throw new Error(t('ssh.exe (OpenSSH client) was not found.'));
+        }
+        const auth = await this.authOptions(options);
+        const args = [...this.baseArgs(target), ...auth.args, ...(options.sshArgs || []), this.destination(target), ...remoteArgs];
+        let child;
+        try {
+            child = spawn(ssh, args, { windowsHide: true, env: auth.env || process.env });
+        } catch (error) {
+            auth.dispose();
+            throw error;
+        }
+        child.once('close', () => auth.dispose());
+        child.once('error', () => auth.dispose());
+        return child;
     }
 
     async testKey(target, keyPath) {

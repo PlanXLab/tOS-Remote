@@ -323,6 +323,17 @@ class Rclone {
         await this.call('operations/mkdir', { fs: fsString, remote: '' }, 60000);
     }
 
+    /** @returns {Promise<boolean|undefined>} 폴더가 있으면 true, 없으면 false, 확인할 수 없으면 undefined */
+    async dirExists(fsString, remote) {
+        try {
+            const result = await this.call('operations/stat', { fs: fsString, remote }, 30000);
+            return !!(result && result.item && result.item.IsDir);
+        } catch (error) {
+            this.logger.debug(`stat failed (${remote}): ${error.message}`);
+            return undefined;
+        }
+    }
+
     async mount(fsString, drive) {
         await this.call('mount/mount', {
             fs: fsString,
