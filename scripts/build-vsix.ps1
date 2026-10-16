@@ -8,7 +8,7 @@
 
 .EXAMPLE
     .\scripts\build-vsix.ps1
-    code --install-extension .\dist\tos-remote-0.5.2.vsix
+    code --install-extension .\dist\tos-remote-0.6.1.vsix
 #>
 param(
     [string]$OutDir

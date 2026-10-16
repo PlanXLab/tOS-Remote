@@ -16,7 +16,8 @@ try {
 const GRACE_MS = 10000;
 
 function normalizePath(value) {
-    return path.normalize(String(value).replace(/^"|"$/g, '')).toLowerCase();
+    const normalized = path.normalize(String(value).replace(/^"|"$/g, ''));
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
 /**

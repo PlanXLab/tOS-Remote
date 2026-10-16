@@ -2,7 +2,7 @@
     "name": "tos-remote",
     "displayName": "%displayName%",
     "description": "%description%",
-    "version": "0.5.2",
+    "version": "0.6.1",
     "publisher": "PlanXLab",
     "license": "GPL-3.0-or-later",
     "icon": "media/icon.png",

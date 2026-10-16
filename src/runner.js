@@ -1,10 +1,11 @@
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
 const vscode = require('vscode');
 const { shellQuote, lastLine, writeIfChanged, getFreePort } = require('./util');
 const { buildDebugScript, DEBUG_READY, DEBUG_FAILED, DEBUGPY_MISSING } = require('./debugScript');
-const { buildRunScript, runScriptEnv } = require('./sshTerminal');
+const { buildRunScript, runScriptEnv, terminalScriptPath, terminalShellLaunch } = require('./sshTerminal');
 const { t } = require('./i18n');
 
 const TASK_SOURCE = 'tOS';
@@ -15,6 +16,7 @@ class Runner {
         this.ssh = ssh;
         this.log = log;
         this.debugChild = undefined;
+        this.debugLaunch = undefined;
         // 보드에 debugpy가 없을 때 설치 (extension.js에서 연결)
         this.boardTools = undefined;
     }
@@ -93,17 +95,22 @@ class Runner {
     async runRemote(session, relativePath) {
         const folder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0];
         const command = `cd ${shellQuote(session.remoteWorkspace)} && ${session.pythonCommand || 'python3'} -u ${shellQuote(relativePath)}`;
-        // 터미널에는 프로그램 출력만 보이도록 ssh 명령줄을 배치 파일 + 환경 변수로 넘긴다 (echo 끔, 종료 코드 0)
-        const script = path.join(this.sessionMgr.storageDir, 'run-on-tos.cmd');
-        writeIfChanged(script, buildRunScript());
+        // 터미널에는 프로그램 출력만 보이도록 SSH 실행 스크립트에서 명령줄을 숨긴다.
         const sshArgs = [...this.sshArgs(session, false), '-t', `${session.user}@${session.host}`, command];
-        const cmd = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe');
+        const script = terminalScriptPath(this.sessionMgr.storageDir, 'run-on-tos');
+        writeIfChanged(script, buildRunScript(this.ssh.sshPath, sshArgs));
+        if (process.platform !== 'win32') {
+            fs.chmodSync(script, 0o700);
+        }
+        const launch = terminalShellLaunch(script);
         const task = new vscode.Task(
             { type: 'tos-remote', file: relativePath },
             folder || vscode.TaskScope.Workspace,
             t('Run on tOS: {0}', relativePath),
             TASK_SOURCE,
-            new vscode.ProcessExecution(cmd, ['/d', '/c', script], { env: runScriptEnv(this.ssh.sshPath, sshArgs) }),
+            new vscode.ProcessExecution(launch.shellPath, launch.shellArgs, {
+                env: process.platform === 'win32' ? runScriptEnv(this.ssh.sshPath, sshArgs) : undefined
+            }),
             []
         );
         task.presentationOptions = {
@@ -121,12 +128,13 @@ class Runner {
 
     /**
      * @param {{keyPath?: string, password?: string}} sshAuth
+     * @param {number} [reuseLocalPort]
      * @returns {Promise<number>} PC 로컬 포워딩 포트. debugpy가 없으면 error.code === 'DEBUGPY_MISSING'
      */
-    async startDebuggee(session, relativePath, token, sshAuth) {
+    async startDebuggee(session, relativePath, token, sshAuth, reuseLocalPort) {
         this.stopDebuggee(false);
         const remotePort = session.debugPort || 5678;
-        const localPort = await getFreePort();
+        const localPort = reuseLocalPort || await getFreePort();
         const script = buildDebugScript({
             remoteWorkspace: session.remoteWorkspace,
             pythonCommand: session.pythonCommand || 'python3',
@@ -192,6 +200,92 @@ class Runner {
         });
     }
 
+    registerDebugLaunch(session, relativePath, sshAuth, localPort, folder) {
+        this.debugLaunch = { session, relativePath, sshAuth: { ...sshAuth }, localPort, folder };
+        return this.debugTaskLabel();
+    }
+
+    debugTaskLabel() {
+        return t('Preparing debug on tOS');
+    }
+
+    provideTasks() {
+        return this.debugLaunch ? [this.createDebugTask(this.debugLaunch)] : [];
+    }
+
+    resolveTask(task) {
+        if (!this.debugLaunch || !task || !task.definition || task.definition.type !== 'tos-remote'
+            || task.name !== this.debugTaskLabel()) {
+            return undefined;
+        }
+        return this.createDebugTask(this.debugLaunch);
+    }
+
+    createDebugTask(launch) {
+        const task = new vscode.Task(
+            { type: 'tos-remote', file: launch.relativePath },
+            launch.folder || vscode.TaskScope.Workspace,
+            this.debugTaskLabel(),
+            TASK_SOURCE,
+            new vscode.CustomExecution(() => this.createDebugTaskTerminal(launch)),
+            []
+        );
+        task.presentationOptions = {
+            reveal: vscode.TaskRevealKind.Never,
+            echo: false,
+            focus: false,
+            showReuseMessage: false
+        };
+        return task;
+    }
+
+    createDebugTaskTerminal(launch) {
+        const writeEmitter = new vscode.EventEmitter();
+        const closeEmitter = new vscode.EventEmitter();
+        let closed = false;
+        const finish = (code) => {
+            if (!closed) {
+                closed = true;
+                closeEmitter.fire(code);
+            }
+        };
+        return {
+            onDidWrite: writeEmitter.event,
+            onDidClose: closeEmitter.event,
+            open: () => {
+                this.ensureDebuggee(launch).then(
+                    () => finish(0),
+                    (error) => {
+                        const message = error && error.message ? error.message : String(error);
+                        this.log.error(`Could not prepare the remote debuggee: ${message}`);
+                        writeEmitter.fire(`${message}\r\n`);
+                        finish(1);
+                    }
+                );
+            },
+            close: () => {
+                closed = true;
+            }
+        };
+    }
+
+    async ensureDebuggee(launch) {
+        if (this.debugLaunch !== launch) {
+            throw new Error(t('Debugging was canceled.'));
+        }
+        const child = this.debugChild;
+        if (child && child.exitCode === null && child.signalCode === null) {
+            return;
+        }
+        await this.startDebuggee(launch.session, launch.relativePath, undefined, launch.sshAuth, launch.localPort);
+    }
+
+    detachDebuggee() {
+        if (this.debugChild && this.debugChild.exitCode === null) {
+            this.log.info('Debugger disconnected; leaving the remote process and SSH tunnel running.');
+        }
+    }
+
     stopDebuggee(killRemote) {
         const child = this.debugChild;
         this.debugChild = undefined;
@@ -212,6 +306,7 @@ class Runner {
 
     dispose() {
         this.stopDebuggee(false);
+        this.debugLaunch = undefined;
     }
 }
 
@@ -282,11 +377,13 @@ class DebugConfigurationProvider {
                 localPort = await start();
             }
 
+            const preLaunchTask = this.runner.registerDebugLaunch(session, relativePath, sshAuth, localPort, folder);
             return {
                 type: 'debugpy',
                 request: 'attach',
                 name: config.name || `tOS: ${relativePath}`,
                 connect: { host: '127.0.0.1', port: localPort },
+                preLaunchTask,
                 pathMappings: this.sessionMgr.getPathMappings().map((m) => ({ localRoot: m.local, remoteRoot: m.remote })),
                 redirectOutput: true,
                 justMyCode: config.justMyCode !== false,

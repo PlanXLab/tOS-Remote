@@ -10,7 +10,24 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Test platform installers and SFTP synchronization
+        run: node test/install.js
+
   build:
+    needs: test
     runs-on: windows-latest
     env:
       # 저장소 Settings > Secrets and variables > Actions에 VSCE_PAT(Marketplace: Manage 권한 토큰)를 등록하면
@@ -22,9 +39,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-
-      - name: Unit tests
-        run: node test/run.js
 
       - name: Check tag matches package.json version
         if: startsWith(github.ref, 'refs/tags/v')

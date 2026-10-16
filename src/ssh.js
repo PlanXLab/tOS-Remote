@@ -7,12 +7,18 @@ const { spawn } = require('child_process');
 const { runProcess, findExecutable, removeFile, noopLogger } = require('./util');
 const { t } = require('./i18n');
 
-const SYSTEM_OPENSSH_DIR = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'OpenSSH');
+const SYSTEM_OPENSSH_DIR = process.platform === 'win32'
+    ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'OpenSSH')
+    : undefined;
 const DEFAULT_KEY_NAMES = ['id_ed25519', 'id_ecdsa', 'id_rsa'];
 
 function findOpenSshTool(name) {
-    const systemPath = path.join(SYSTEM_OPENSSH_DIR, name);
-    return fs.existsSync(systemPath) ? systemPath : findExecutable(name);
+    const executable = name.replace(/\.exe$/i, '');
+    if (process.platform === 'win32') {
+        const systemPath = path.join(SYSTEM_OPENSSH_DIR, `${executable}.exe`);
+        return fs.existsSync(systemPath) ? systemPath : findExecutable(`${executable}.exe`);
+    }
+    return findExecutable(executable);
 }
 
 function expandHome(file) {
@@ -51,11 +57,11 @@ class SshClient {
     }
 
     get sshPath() {
-        return findOpenSshTool('ssh.exe');
+        return findOpenSshTool('ssh');
     }
 
     get keygenPath() {
-        return findOpenSshTool('ssh-keygen.exe');
+        return findOpenSshTool('ssh-keygen');
     }
 
     // 보드 재설치로 호스트 키가 바뀌어도 접속되도록 확장 전용 known_hosts를 사용하고 매 연결 시 초기화한다
@@ -120,7 +126,7 @@ class SshClient {
     async exec(target, command, options = {}) {
         const ssh = this.sshPath;
         if (!ssh) {
-            throw new Error(t('ssh.exe (OpenSSH client) was not found.'));
+            throw new Error(t('The OpenSSH client (ssh) was not found.'));
         }
         const auth = await this.authOptions(options);
         try {
@@ -146,7 +152,7 @@ class SshClient {
     async spawn(target, remoteArgs, options = {}) {
         const ssh = this.sshPath;
         if (!ssh) {
-            throw new Error(t('ssh.exe (OpenSSH client) was not found.'));
+            throw new Error(t('The OpenSSH client (ssh) was not found.'));
         }
         const auth = await this.authOptions(options);
         const args = [...this.baseArgs(target), ...auth.args, ...(options.sshArgs || []), this.destination(target), ...remoteArgs];
@@ -182,7 +188,7 @@ class SshClient {
     async generateKey(keyPath) {
         const keygen = this.keygenPath;
         if (!keygen) {
-            throw new Error(t('ssh-keygen.exe (OpenSSH client) was not found.'));
+            throw new Error(t('The OpenSSH key generator (ssh-keygen) was not found.'));
         }
         fs.mkdirSync(path.dirname(keyPath), { recursive: true });
         const result = await runProcess(keygen, ['-q', '-t', 'ed25519', '-N', '', '-C', `tos-remote@${os.hostname()}`, '-f', keyPath], { timeoutMs: 30000 });

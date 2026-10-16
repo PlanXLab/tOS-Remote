@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     격리된 사용자 데이터/확장 폴더로 VS Code 확장 개발 호스트를 실행해 test/integration/index.js를 수행한다.
-    rclone 다운로드(인터넷), WinFsp, OpenSSH 클라이언트가 필요하다. 테스트 중 VS Code 창이 잠시 열린다.
+    rclone 다운로드(인터넷), OpenSSH 클라이언트가 필요하다. 테스트 중 VS Code 창이 잠시 열린다.
 
 .EXAMPLE
     .\scripts\integration-test.ps1 -CodePath "C:\Users\me\AppData\Local\Programs\Microsoft VS Code\Code.exe"
@@ -77,7 +77,7 @@ if (Test-Path $pidFile) {
         Add-Content $OutFile "PASS 확장 호스트 종료 후 rclone 데몬·마운트 유지 (pid $daemonPid)" -Encoding UTF8
 
         # 2단계: 생성된 작업 공간 파일로 VS Code를 열어 재연결(attach)·실행 경로 확인
-        $rcloneExe = Get-ChildItem "$Work\user-data" -Recurse -Filter rclone.exe | Select-Object -First 1 -ExpandProperty FullName
+        $rcloneExe = Get-Content (Join-Path $Work 'rclone-path.txt') -Encoding UTF8
         $server = Start-Process -FilePath $rcloneExe -ArgumentList @('serve', 'sftp', "`"$ServeDir`"", '--addr', "127.0.0.1:$Port", '--user', 'tos', '--pass', 'secret', '--config', 'NUL', '--dir-cache-time', '100ms') -WindowStyle Hidden -PassThru
         Start-Sleep -Seconds 2
         $env:TOS_IT_PHASE = '2'

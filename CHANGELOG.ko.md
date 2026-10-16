@@ -2,9 +2,20 @@
 
 [English](CHANGELOG.md) | **한국어**
 
+## 0.6.1
+
+- **원격 디버깅 수명 주기 개선**: 연결을 끊어도 원격 프로세스를 유지하고, 이전 프로세스가 종료된 뒤 다시 시작하면 새 디버그 프로세스를 준비합니다.
+- **창 간 작업 공간 상태 동기화**: 다른 창에서 원격 작업 공간을 닫으면 열린 창에도 상태를 반영합니다.
+
+## 0.6.0
+
+- **크로스 플랫폼 지원**: Windows·Linux·macOS에서 실행할 수 있습니다(x64·arm64). OS별 OpenSSH 클라이언트·비밀번호 도우미·터미널 스크립트를 사용합니다.
+- **호스트 패키지 관리자 활용**: 설치된 지원 rclone을 재사용하고, 없으면 winget/Scoop/Chocolatey, Homebrew/MacPorts 또는 주요 Linux 패키지 관리자를 시도합니다. 필요하면 SHA-256을 검증한 공식 실행 파일을 선택할 수 있습니다. `PATH` 또는 `~/.local/bin`의 기존 uv도 재사용하며, uv를 내려받을 때는 호스트 OS·아키텍처에 맞는 패키지를 선택합니다.
+- **OS별 캐시 경로**: rclone과 Python 패키지 캐시를 각 OS의 표준 사용자 캐시 디렉터리에 저장합니다.
+- **크로스 플랫폼 회귀 테스트**: 패키징 전에 CI가 Windows·Linux·macOS에서 rclone·uv의 실제 다운로드, 실행 권한, SFTP 동기화를 검증합니다.
+
 ## 0.5.2
 
-- **로컬 빌드 도구 없는 Marketplace 패키징**: `scripts/build-vsix.ps1`로 업로드 가능한 `.vsix`를 바로 만듭니다. Node.js나 `vsce` 설치가 필요하지 않습니다.
 - **Jupyter 확장 선택 설치**: 자동 권장 목록에서 제외했습니다. Jupyter 셀을 사용할 때만 설치하면 됩니다.
 - **안전한 창 전환**: 원격 작업 공간이 다른 창에 이미 열려 있으면 현재 폴더를 교체하지 않고 창 전환기를 엽니다.
 - **Jupyter 커널 자동 선택**: 원격 작업 공간 창에서 노트북이나 `#%%` 셀이 있는 Python 파일을 열면, 보드에 Jupyter가 설치되어 있을 때 서버를 시작하고 보드 커널을 선택합니다. 더 이상 매번 **Select Another Kernel > tOS Remote > Python 3 (ipykernel)**을 고를 필요가 없습니다. 보드마다 처음 한 번은 보드 커널 목록이 표시되며 그 선택을 기억합니다. Interactive 창은 열릴 때 서버가 이미 실행 중이라 보드 커널을 다시 사용합니다. 새 설정 `tosRemote.jupyterAutoSelectKernel`(기본값 `true`).

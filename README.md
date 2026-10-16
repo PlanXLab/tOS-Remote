@@ -8,7 +8,7 @@ Nothing is installed on the board for VS Code: no VS Code Server is needed. The 
 
 ## Features
 
-- **Open/close the remote workspace**: Syncs the board's working folder (default `/home/tos/Workspace`) to a user-specified local SSD folder on your PC, opening it in VS Code with instant background SFTP upload on save.
+- **Open/close the remote workspace**: Syncs the board's working folder (default `/home/tos/Workspace`) to a user-specified local SSD folder, opening it in VS Code with instant background SFTP upload on save.
 - **Sidebar panel**: Board host, user, workspace, and local folder settings, connection test, SSH key registration, prerequisites (rclone, OpenSSH, uv), board tools (debugpy, Jupyter), and tools.
 - **Getting Started walkthrough**: Guides you step by step: install rclone → board settings → register an SSH key → open the workspace. Steps that are already done are checked automatically; you do not need to select **Mark Done**.
 - **SSH terminal**: The default terminal of the workspace opens a shell on the board. If VS Code restores local terminals from an earlier session when the workspace window opens, they are replaced with the board terminal.
@@ -43,12 +43,12 @@ Nothing is installed on the board for VS Code: no VS Code Server is needed. The 
 
 | Item | Description |
 |---|---|
-| Windows 10/11 (x64, arm64) | Only Windows is supported for now. |
-| OpenSSH client | Included with Windows (`C:\Windows\System32\OpenSSH\ssh.exe`). |
-| [rclone](https://rclone.org) | The extension downloads the latest version on first use and verifies its SHA-256. Once installed, it is not downloaded again or updated. For offline use, set `tosRemote.rclonePath`. |
+| Windows 10/11, Linux, macOS | x64 and arm64. |
+| OpenSSH client | Install the OpenSSH client and key generator (`ssh`, `ssh-keygen`) for your OS. Windows includes an optional OpenSSH Client feature. |
+| [rclone](https://rclone.org) | Version 1.65.0 or newer. The extension reuses a supported installation first. If missing, it tries winget/Scoop/Chocolatey, Homebrew/MacPorts, or apt/dnf/pacman/zypper/yum/apk in a terminal (which may request administrator/sudo approval). If unavailable or unsuitable, it offers the official SHA-256-verified download. On Linux, the download fallback requires `unzip` or `bsdtar`. For offline use, set `tosRemote.rclonePath`. |
 | Python Debugger extension (`ms-python.debugpy`) | Required for remote debugging (F5). |
 | Jupyter extension (`ms-toolsai.jupyter`) | Optional; install it when you want to run Jupyter cells on the board. |
-| [uv](https://docs.astral.sh/uv/) | Needed only to install board tools. Downloaded from PyPI (SHA-256 verified) the first time you install board tools (about 15 MB). The first resolution also downloads a Python runtime for uv (about 21 MB). Your PC must be online when installing board tools. |
+| [uv](https://docs.astral.sh/uv/) | Version 0.8.0 or newer; needed only to install board tools. An installed `uv` is reused without upgrading it; otherwise the extension downloads a matching Windows/Linux/macOS build from PyPI and verifies its SHA-256. The first resolution also downloads a Python runtime for uv (about 21 MB). Your computer must be online when installing board tools. |
 | `debugpy`, `jupyter_server`, `ipykernel` on the board | Installed from the panel (**Board Tools**) if missing. |
 
 ## Usage
@@ -60,7 +60,7 @@ Nothing is installed on the board for VS Code: no VS Code Server is needed. The 
 4. Select **Open Remote Workspace**. If no local workspace folder is set yet, choose a folder on your PC, then choose whether to replace the current VS Code window or open the remote workspace in a new window.
 5. When you are done, select **Close Remote Workspace**. The workspace closes after all pending uploads to the board finish.
 
-- The remote workspace can be open in only one window. If it is already open elsewhere, use **Go to That Window** to open VS Code's window switcher without replacing the current folder. Changes made in VS Code, Windows Explorer, or the remote terminal are synchronized in both directions; if the same file changes on both sides, the most recently modified copy wins.
+- The remote workspace can be open in only one window. If it is already open elsewhere, use **Go to That Window** to open VS Code's window switcher without replacing the current folder. Changes made in VS Code, your file manager, or the remote terminal are synchronized in both directions; if the same file changes on both sides, the most recently modified copy wins.
 - If you quit VS Code without closing the workspace, your local files remain intact and reconnect automatically the next time.
 - If you connect with a password only, the terminal and **Run on tOS** ask for the password every time. Debugging, board tools, and Jupyter use the saved password. Registering an SSH key is recommended.
 
@@ -93,7 +93,7 @@ print(sys.path)   # runs on the board
 | `tosRemote.debugPort` | `5678` | debugpy port |
 | `tosRemote.pythonLibraryPaths` | (auto-detect) | Board package paths to copy for IntelliSense. Paths set here are all treated as required. |
 | `tosRemote.pathMappings` | `[]` | Additional path mappings for terminal links |
-| `tosRemote.rclonePath` | (auto-install) | Path to an rclone.exe you provide |
+| `tosRemote.rclonePath` | (auto-install) | Path to an rclone executable you provide |
 | `tosRemote.packageExcludeNewer` | (empty) | Install board packages as they were on this date (for example `2026-10-01`). Use the same date on every PC to install identical versions on all boards in a class. If empty, the latest versions compatible with the board's Python are used. |
 | `tosRemote.jupyterAutoSelectKernel` | `true` | Start Jupyter on the board when a notebook or `#%%` file is opened, and select the board's kernel automatically. |
 
@@ -104,7 +104,7 @@ All settings are machine-specific and are not copied to other PCs by Settings Sy
 ```
 VS Code (extension) ──HTTP (127.0.0.1, random port/credentials)──▶ rclone rcd (detached)
      │                                                              │ SFTP
-     │ ssh.exe (terminal, run, debug)                               ▼
+     │ ssh (terminal, run, debug)                                   ▼
      └─────────────────────────────────────────────────────────▶ Dropbear (board)
                                      Local SSD workspace ◀──▶ Instant SFTP sync
 ```
@@ -112,17 +112,18 @@ VS Code (extension) ──HTTP (127.0.0.1, random port/credentials)──▶ rcl
 - rclone runs as a control server (`rclone rcd`) detached from the extension process, surviving window reloads and VS Code restarts.
 - The workspace file (`.code-workspace`) is created in the extension storage on your PC; nothing is written to the board.
 - Before running or debugging after a save, the extension flushes the sync queue so the board never runs an old file.
-- The SSH terminal runs through `ssh-terminal.cmd` (cmd.exe) in the extension storage, which handles connection retries and exit codes. **Run on tOS** runs through `run-on-tos.cmd`, which receives the ssh command in environment variables so that it is not shown in the terminal.
+- The SSH terminal runs through a platform-specific script in extension storage (`.cmd` on Windows, `.sh` on Linux/macOS), which handles connection retries and exit codes. **Run on tOS** uses the same approach to keep the ssh command out of the terminal output.
 - Python library sync uses at most 4 SSH connections because of the concurrent connection limit of the board (Dropbear), and starts 15 seconds after the workspace opens. The board tools (debugpy, Jupyter) are checked in the same SSH connection when the workspace opens.
 - File changes in the local workspace are uploaded to the board after a 200 ms debounce (`operations/copyfile` / `operations/deletefile`). Use **Pull from Board** in the panel to pull files created or modified directly on the board.
-- Board tools: uv on the PC resolves the packages for the board (`--python-version` and `--python-platform` from the board, wheels only, packages already on the board are kept). The wheels are downloaded from PyPI and verified with SHA-256, copied with rclone to `/tmp/tos-remote.XXXXXX` (mode 0700), and installed with `sudo pip install --no-index --find-links`. The resolver data stays in the extension storage (`uv.exe`, the uv Python runtime) and `%LOCALAPPDATA%\tOS Remote\uv-cache`.
+- Board tools: uv on the PC resolves the packages for the board (`--python-version` and `--python-platform` from the board, wheels only, packages already on the board are kept). An existing supported `uv` on `PATH`, in `~/.local/bin`, or in the usual package-manager binary directories is reused; otherwise a platform-matched binary is downloaded from PyPI and SHA-256 verified. The wheels are downloaded from PyPI and verified with SHA-256, copied with rclone to `/tmp/tos-remote.XXXXXX` (mode 0700), and installed with `sudo pip install --no-index --find-links`. The resolver data stays in the extension storage (including the uv Python runtime). Caches use `%LOCALAPPDATA%\tOS Remote` on Windows, `~/Library/Caches/tOS Remote` on macOS, and `$XDG_CACHE_HOME/tOS Remote` or `~/.cache/tOS Remote` on Linux.
 - Jupyter: the server runs on the board as the board user (`python3 -m jupyter_server`, `127.0.0.1`, random port and token, terminals disabled), and its state and log are kept in `~/.local/state/tos-remote` (mode 0700). The PC forwards a free local port to it with `ssh -N -L` and registers it with the Jupyter extension (`createJupyterServerCollection`). If the forwarding drops, it reconnects automatically while the server is running.
-- With password authentication, background ssh commands receive the saved password through `SSH_ASKPASS`: a small helper (`askpass.cmd`, which runs VS Code's own Node.js) reads it from a one-time named pipe opened by the extension.
+- With password authentication, background ssh commands receive the saved password through `SSH_ASKPASS`: a small helper script (`.cmd` on Windows, `.sh` on Linux/macOS) runs VS Code's own Node.js and reads it from a one-time local channel opened by the extension.
 
 ## Security Notes
 
 - **SSH host keys are not verified**, so the connection keeps working after the board is reinstalled. Use it only on trusted networks (direct connection or a lab network).
 - While remote debugging, debugpy listens on `127.0.0.1:5678` on the board and is forwarded securely to your PC through an SSH tunnel.
+- Disconnecting leaves the remote process and its SSH tunnel running. Restart prepares a new remote debuggee if the previous process has exited.
 - The rclone control server listens only on `127.0.0.1` and uses random credentials each time it starts.
 - The Jupyter server listens only on `127.0.0.1` on the board and requires a random token; it is reached only through the SSH tunnel.
 - Board packages are installed into the global Python environment with sudo. The sudo password is not stored by this feature; the saved board password is reused if you saved one in the panel.
@@ -143,6 +144,7 @@ media/             Sidebar panel (html/css/js), icon, walkthrough pages (English
 l10n/              Korean translations of runtime strings (bundle.l10n.ko.json; source strings are the English in the code)
 package.nls*.json  Manifest strings (English default, .ko Korean)
 test/run.js        Unit tests (node test/run.js, including checks for missing translations and placeholders)
+test/install.js    Network-enabled platform installer tests, followed by the unit suite with a real local SFTP server
 test/integration/  VS Code extension host integration tests (local rclone SFTP server instead of the board; English and Korean display languages)
 scripts/build-vsix.ps1         Builds a Marketplace-uploadable .vsix without Node.js or build tools
 scripts/integration-test.ps1   Runs the integration tests
@@ -150,6 +152,7 @@ scripts/integration-test.ps1   Runs the integration tests
 
 ```powershell
 node test/run.js                       # Unit tests
+node test/install.js                   # Downloads/verifies rclone and uv, then runs all tests with real SFTP
 .\scripts\build-vsix.ps1               # dist\tos-remote-<version>.vsix (no Node.js or build tools needed)
 .\scripts\integration-test.ps1 -CodePath <Code.exe>
 ```
@@ -157,6 +160,10 @@ node test/run.js                       # Unit tests
 Upload the generated `.vsix` from the Visual Studio Marketplace publisher page. No Node.js or `vsce` installation is needed to package the extension.
 
 The integration tests cannot start while another VS Code instance with the same user data is running. If you use a portable VS Code, pass the `Code.exe` of a copy without the `data` folder.
+
+The unit suite is platform-independent. The supplied integration-test launcher is a PowerShell script for Windows; the extension host test itself uses platform-neutral paths and can also be launched from VS Code on Linux or macOS.
+
+CI runs the installer and SFTP tests on Windows, Linux, and macOS before packaging a universal VSIX. No platform-specific native binaries are bundled.
 
 ### Localization
 
@@ -170,4 +177,4 @@ The integration tests cannot start while another VS Code instance with the same 
 
 [GPL-3.0-or-later](LICENSE). Copyright (C) PlanXLab.
 
-This extension does not bundle rclone or uv. rclone (MIT) is downloaded from the official site on first use, and uv (MIT or Apache-2.0) is downloaded from PyPI when you first install board tools. Board packages (debugpy, Jupyter) are downloaded from PyPI when you install them.
+This extension does not bundle rclone or uv. It uses supported rclone and uv installations already available on your computer where possible. Otherwise, rclone (MIT) is installed with an available package manager or downloaded from the official site with SHA-256 verification; uv (MIT or Apache-2.0) is downloaded from PyPI with SHA-256 verification when you first install board tools. Board packages (debugpy, Jupyter) are downloaded from PyPI when you install them.

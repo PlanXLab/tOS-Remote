@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const net = require('net');
 const crypto = require('crypto');
@@ -78,7 +79,21 @@ function samePath(a, b) {
     if (!a || !b) {
         return false;
     }
-    return path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+    const left = path.resolve(a);
+    const right = path.resolve(b);
+    return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+function userCacheDirectory(appName) {
+    let root;
+    if (process.platform === 'win32') {
+        root = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    } else if (process.platform === 'darwin') {
+        root = path.join(os.homedir(), 'Library', 'Caches');
+    } else {
+        root = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
+    }
+    return appName ? path.join(root, appName) : root;
 }
 
 function readJson(file) {
@@ -119,13 +134,19 @@ function isProcessAlive(pid) {
 // PID 재사용으로 다른 프로세스를 종료하지 않도록 실행 파일 이름을 확인
 function getProcessImageName(pid) {
     return new Promise((resolve) => {
-        execFile('tasklist.exe', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { windowsHide: true }, (error, stdout) => {
+        const command = process.platform === 'win32' ? 'tasklist.exe' : 'ps';
+        const args = process.platform === 'win32'
+            ? ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH']
+            : ['-p', String(pid), '-o', 'comm='];
+        execFile(command, args, { windowsHide: true }, (error, stdout) => {
             if (error) {
                 resolve(undefined);
                 return;
             }
-            const match = /^"([^"]+)"/m.exec(stdout || '');
-            resolve(match ? match[1].toLowerCase() : undefined);
+            const image = process.platform === 'win32'
+                ? (/^"([^"]+)"/m.exec(stdout || '') || [])[1]
+                : String(stdout || '').trim();
+            resolve(image ? path.basename(image).toLowerCase() : undefined);
         });
     });
 }
@@ -231,15 +252,43 @@ function runProcess(file, args, options = {}) {
     });
 }
 
-function findExecutable(name) {
-    const dirs = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+function findExecutables(name) {
+    const home = os.homedir();
+    const localAppData = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+    const standardDirs = process.platform === 'darwin'
+        ? ['/opt/homebrew/bin', '/usr/local/bin', '/opt/local/bin', '/usr/bin', '/bin']
+        : process.platform === 'linux' ? ['/usr/local/bin', '/usr/bin', '/bin']
+            : [
+                path.join(localAppData, 'Microsoft', 'WinGet', 'Links'),
+                path.join(localAppData, 'Microsoft', 'WindowsApps'),
+                path.join(process.env.SCOOP || path.join(home, 'scoop'), 'shims'),
+                path.join(process.env.ChocolateyInstall || path.join(process.env.ProgramData || 'C:\\ProgramData', 'chocolatey'), 'bin')
+            ];
+    const dirs = [...new Set([
+        ...String(process.env.PATH || '').split(path.delimiter),
+        path.join(home, '.local', 'bin'),
+        ...standardDirs
+    ].filter(Boolean))];
+    const found = [];
     for (const dir of dirs) {
         const candidate = path.join(dir.replace(/^"|"$/g, ''), name);
-        if (fs.existsSync(candidate)) {
-            return candidate;
+        try {
+            if (!fs.statSync(candidate).isFile()) {
+                continue;
+            }
+            if (process.platform !== 'win32') {
+                fs.accessSync(candidate, fs.constants.X_OK);
+            }
+            found.push(candidate);
+        } catch {
+            // Continue through PATH when a candidate is missing or not executable.
         }
     }
-    return undefined;
+    return found;
+}
+
+function findExecutable(name) {
+    return findExecutables(name)[0];
 }
 
 function lastLine(text) {
@@ -271,6 +320,7 @@ module.exports = {
     normalizeWorkspaceFolder,
     workspacePathOf,
     samePath,
+    userCacheDirectory,
     readJson,
     writeJson,
     removeFile,
@@ -280,6 +330,7 @@ module.exports = {
     randomToken,
     probeTcp,
     runProcess,
+    findExecutables,
     findExecutable,
     lastLine,
     writeIfChanged

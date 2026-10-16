@@ -1,10 +1,15 @@
 'use strict';
 
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const vscode = require('vscode');
-const { installRclone, installUv, getUvVersion } = require('./installer');
+const {
+    installRclone, installUv, getUvVersion, getRclonePackageManager, rcloneExecutableName, uvExecutableName
+} = require('./installer');
 const { Rclone, MIN_VERSION, compareVersions } = require('./rclone');
 const { getSettings } = require('./settings');
+const { findExecutable, findExecutables } = require('./util');
 const { t } = require('./i18n');
 
 const OPENSSH_DOCS = 'https://learn.microsoft.com/windows-server/administration/openssh/openssh_install_firstuse';
@@ -27,15 +32,60 @@ class Prerequisites {
     }
 
     rcloneExePath() {
-        return getSettings().rclonePath || path.join(this.binDir, 'rclone.exe');
+        const configured = getSettings().rclonePath;
+        if (configured) {
+            return configured;
+        }
+        const local = path.join(this.binDir, rcloneExecutableName());
+        return this.resolvedRclonePath || (fs.existsSync(local) ? local : (findExecutable(rcloneExecutableName()) || local));
     }
 
     uvExePath() {
-        return path.join(this.binDir, 'uv.exe');
+        const executable = uvExecutableName();
+        const local = path.join(this.binDir, executable);
+        return this.resolvedUvPath || (fs.existsSync(local) ? local : (findExecutable(executable) || local));
+    }
+
+    async resolveExecutable(name, getVersion, isSupported) {
+        const local = path.join(this.binDir, name);
+        const candidates = [...new Set([local, ...findExecutables(name)])];
+        let firstInstalled;
+        for (const exePath of candidates) {
+            if (!fs.existsSync(exePath)) {
+                continue;
+            }
+            const version = await getVersion(exePath);
+            if (!firstInstalled) {
+                firstInstalled = { exePath, version };
+            }
+            if (isSupported(version)) {
+                return { exePath, version };
+            }
+            this.log.warn(`Unsupported or unusable ${name}: ${exePath} (${version || 'version check failed'})`);
+        }
+        return firstInstalled || { exePath: local, version: undefined };
+    }
+
+    async resolveRclone() {
+        const configured = getSettings().rclonePath;
+        if (configured) {
+            this.resolvedRclonePath = undefined;
+            return this.rclone.getVersion(configured);
+        }
+        const result = await this.resolveExecutable(rcloneExecutableName(),
+            (exe) => this.rclone.getVersion(exe), Rclone.isSupportedVersion);
+        this.resolvedRclonePath = result.exePath;
+        return result.version;
+    }
+
+    async resolveUv() {
+        const result = await this.resolveExecutable(uvExecutableName(), getUvVersion, Prerequisites.isSupportedUv);
+        this.resolvedUvPath = result.exePath;
+        return result.version;
     }
 
     async refresh() {
-        const [rcloneVersion, uvVersion] = await Promise.all([this.rclone.getVersion(), getUvVersion(this.uvExePath())]);
+        const [rcloneVersion, uvVersion] = await Promise.all([this.resolveRclone(), this.resolveUv()]);
         this.state = { ssh: !!this.ssh.sshPath, rcloneVersion, uvVersion };
         this.checked = true;
         this.emitter.fire(this.state);
@@ -48,19 +98,20 @@ class Prerequisites {
     }
 
     async ensureAll(options = {}) {
-        if (process.platform !== 'win32') {
-            throw new Error(t('tOS Remote currently supports Windows only.'));
-        }
         let state = await this.refresh();
         if (!state.ssh) {
             if (options.interactive) {
-                const howTo = t('How to Install');
-                const pick = await vscode.window.showErrorMessage(t('The OpenSSH client (ssh.exe) is required. Add "OpenSSH Client" in Windows Settings > System > Optional features.'), howTo);
-                if (pick === howTo) {
-                    vscode.env.openExternal(vscode.Uri.parse(OPENSSH_DOCS));
+                if (process.platform === 'win32') {
+                    const howTo = t('How to Install');
+                    const pick = await vscode.window.showErrorMessage(t('The OpenSSH client (ssh.exe) is required. Add "OpenSSH Client" in Windows Settings > System > Optional features.'), howTo);
+                    if (pick === howTo) {
+                        vscode.env.openExternal(vscode.Uri.parse(OPENSSH_DOCS));
+                    }
+                } else {
+                    vscode.window.showErrorMessage(t('The OpenSSH client (ssh) was not found. Install OpenSSH using your operating system package manager.'));
                 }
             }
-            throw new Error(t('ssh.exe (OpenSSH client) was not found.'));
+            throw new Error(t('The OpenSSH client (ssh) was not found.'));
         }
 
         if (!Rclone.isSupportedVersion(state.rcloneVersion)) {
@@ -68,9 +119,9 @@ class Prerequisites {
                 ? t('rclone {0} is not supported (minimum {1}).', state.rcloneVersion, MIN_VERSION)
                 : t('rclone is not ready yet.');
             if (options.interactive && !getSettings().rclonePath) {
-                const download = t('Download');
-                const pick = await vscode.window.showWarningMessage(`${reason} ${t('Download the latest rclone? (about 30 MB)')}`, { modal: true }, download);
-                if (pick === download) {
+                const install = t('Install');
+                const pick = await vscode.window.showWarningMessage(`${reason} ${t('Install a supported version of rclone now?')}`, { modal: true }, install);
+                if (pick === install) {
                     await this.installRclone();
                     state = await this.refresh();
                 }
@@ -82,13 +133,13 @@ class Prerequisites {
         return state;
     }
 
-    async installRclone() {
+    async installRclone(options = {}) {
         if (getSettings().rclonePath) {
-            vscode.window.showInformationMessage(t('tosRemote.rclonePath ({0}) is set, so rclone will not be downloaded.', getSettings().rclonePath));
+            vscode.window.showInformationMessage(t('tosRemote.rclonePath ({0}) is set, so automatic installation is disabled.', getSettings().rclonePath));
             return undefined;
         }
         // 한 번 설치한 rclone은 다시 내려받지 않는다 (업데이트 기능 없음)
-        const installed = await this.rclone.getVersion();
+        const installed = await this.resolveRclone();
         if (Rclone.isSupportedVersion(installed)) {
             vscode.window.showInformationMessage(t('rclone {0} is already installed.', installed));
             await this.refresh();
@@ -99,7 +150,45 @@ class Prerequisites {
             return undefined;
         }
         try {
-            const result = await vscode.window.withProgress({
+            let result;
+            const manager = options.usePackageManager === false ? undefined : getRclonePackageManager();
+            if (manager) {
+                let exitCode;
+                let startError;
+                try {
+                    exitCode = await this.runPackageManager(manager);
+                } catch (error) {
+                    startError = error;
+                    this.log.error(`${manager.label} could not start: ${error.message}`);
+                }
+                await this.refresh();
+                const version = this.state.rcloneVersion;
+                if (exitCode === 0 && Rclone.isSupportedVersion(version)) {
+                    result = { version, exePath: this.rcloneExePath() };
+                    vscode.window.showInformationMessage(t('rclone {0} installed with {1}.', version, manager.label));
+                    return result;
+                }
+                const download = t('Download verified release');
+                let reason;
+                if (startError) {
+                    reason = t('Could not start {0}: {1}', manager.label, startError.message);
+                } else if (exitCode === undefined) {
+                    reason = t('The {0} installation was cancelled.', manager.label);
+                } else if (exitCode !== 0) {
+                    reason = t('{0} exited with code {1}.', manager.label, exitCode);
+                } else {
+                    reason = t('The {0} package manager did not provide a supported rclone version.', manager.label);
+                }
+                const pick = await vscode.window.showWarningMessage(
+                    `${reason} ${t('Download the verified official release instead?')}`,
+                    { modal: true },
+                    download
+                );
+                if (pick !== download) {
+                    return undefined;
+                }
+            }
+            result = await vscode.window.withProgress({
                 location: vscode.ProgressLocation.Notification,
                 title: t('Installing rclone')
             }, (progress) => installRclone({
@@ -107,14 +196,17 @@ class Prerequisites {
                 logger: this.log,
                 onProgress: (message) => progress.report({ message })
             }));
-            vscode.window.showInformationMessage(t('rclone {0} installed.', result.version));
             await this.refresh();
+            if (!Rclone.isSupportedVersion(this.state.rcloneVersion)) {
+                throw new Error(t('rclone is not ready yet.'));
+            }
+            vscode.window.showInformationMessage(t('rclone {0} installed.', result.version));
             return result;
         } catch (error) {
             this.log.error(`rclone install failed: ${error.message}`);
             const openSettings = t('Open Settings');
             const pick = await vscode.window.showErrorMessage(
-                `${t('rclone installation failed.')}\n${error.message}\n${t('If you are offline, download rclone.exe yourself and set tosRemote.rclonePath.')}`,
+                `${t('rclone installation failed.')}\n${error.message}\n${t('If automatic installation is unavailable, set tosRemote.rclonePath to an rclone executable you already have.')}`,
                 openSettings
             );
             if (pick === openSettings) {
@@ -124,16 +216,91 @@ class Prerequisites {
         }
     }
 
+    runPackageManager(manager) {
+        let command = manager.command;
+        let args = manager.args;
+        let shell = !!manager.shell;
+        if (manager.requiresSudo && process.platform !== 'win32' && !(typeof process.getuid === 'function' && process.getuid() === 0)) {
+            const sudo = findExecutable('sudo');
+            if (sudo) {
+                command = sudo;
+                args = [manager.command, ...manager.args];
+                shell = false;
+            }
+        }
+        const executionOptions = { cwd: os.homedir() };
+        const execution = shell
+            ? new vscode.ShellExecution(command, args, {
+                ...executionOptions,
+                executable: process.env.ComSpec || path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe'),
+                shellArgs: ['/d', '/c']
+            })
+            : new vscode.ProcessExecution(command, args, executionOptions);
+        const task = new vscode.Task(
+            { type: 'tosRemote.installRclone', manager: manager.label },
+            vscode.TaskScope.Global,
+            t('Install rclone with {0}', manager.label),
+            'tOS Remote',
+            execution,
+            []
+        );
+        task.presentationOptions = {
+            reveal: vscode.TaskRevealKind.Always,
+            panel: vscode.TaskPanelKind.Dedicated,
+            focus: true,
+            echo: true,
+            clear: false,
+            showReuseMessage: true
+        };
+        return new Promise((resolve, reject) => {
+            let settled = false;
+            let taskExecution;
+            const pending = [];
+            const finish = (code, error) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                processListener.dispose();
+                taskListener.dispose();
+                if (error) {
+                    reject(error);
+                } else {
+                    resolve(code);
+                }
+            };
+            const ended = (execution, exitCode) => {
+                if (!taskExecution) {
+                    pending.push({ execution, exitCode });
+                } else if (execution === taskExecution) {
+                    finish(exitCode);
+                }
+            };
+            const processListener = vscode.tasks.onDidEndTaskProcess((event) => {
+                ended(event.execution, event.exitCode);
+            });
+            const taskListener = vscode.tasks.onDidEndTask((event) => {
+                ended(event.execution, undefined);
+            });
+            vscode.tasks.executeTask(task).then((execution) => {
+                taskExecution = execution;
+                for (const event of pending) {
+                    ended(event.execution, event.exitCode);
+                }
+            }, (error) => finish(undefined, error));
+        });
+    }
+
     static isSupportedUv(version) {
         return !!version && compareVersions(version, MIN_UV_VERSION) >= 0;
     }
 
     /**
-     * 보드용 패키지 해석에 쓰는 uv를 준비한다 (PyPI에서 SHA-256 검증 후 확장 저장소에 설치, 업데이트하지 않음).
-     * @returns {Promise<string>} uv.exe 경로
+     * 보드용 패키지 해석에 쓰는 기존 uv를 재사용하고 없으면 확장 저장소에 설치한다.
+     * @returns {Promise<string>} uv 실행 파일 경로
      */
     async ensureUv(options = {}) {
-        let version = await getUvVersion(this.uvExePath());
+        let version = await this.resolveUv();
         if (Prerequisites.isSupportedUv(version)) {
             return this.uvExePath();
         }
@@ -158,7 +325,7 @@ class Prerequisites {
     }
 
     async installUv() {
-        const installed = await getUvVersion(this.uvExePath());
+        const installed = await this.resolveUv();
         if (Prerequisites.isSupportedUv(installed)) {
             await this.refresh();
             return { version: installed, exePath: this.uvExePath() };
@@ -172,8 +339,11 @@ class Prerequisites {
                 logger: this.log,
                 onProgress: (message) => progress.report({ message })
             }));
-            vscode.window.showInformationMessage(t('uv {0} installed.', result.version));
             await this.refresh();
+            if (!Prerequisites.isSupportedUv(this.state.uvVersion)) {
+                throw new Error(t('uv is not ready yet.'));
+            }
+            vscode.window.showInformationMessage(t('uv {0} installed.', result.version));
             return result;
         } catch (error) {
             this.log.error(`uv install failed: ${error.message}`);

@@ -43,12 +43,12 @@ PC의 VS Code에서 tOS(tOS-Lite, Raspberry Pi 5) 보드의 작업 공간을 열
 
 | 항목 | 설명 |
 |---|---|
-| Windows 10/11 (x64, arm64) | 현재 Windows만 지원합니다. |
-| OpenSSH 클라이언트 | Windows 기본 포함(`C:\Windows\System32\OpenSSH\ssh.exe`) |
-| [rclone](https://rclone.org) | 확장이 처음 사용할 때 최신 버전을 내려받아 SHA-256 검증 후 설치. 한 번 설치하면 다시 내려받거나 업데이트하지 않습니다. 오프라인 환경은 `tosRemote.rclonePath` 지정 |
+| Windows 10/11, Linux, macOS | x64·arm64 |
+| OpenSSH 클라이언트 | OS에 맞는 OpenSSH 클라이언트와 키 생성기(`ssh`, `ssh-keygen`)가 필요합니다. Windows는 선택적 OpenSSH 클라이언트 기능을 제공합니다. |
+| [rclone](https://rclone.org) | 1.65.0 이상. 설치된 지원 버전을 먼저 사용합니다. 없으면 터미널에서 winget/Scoop/Chocolatey, Homebrew/MacPorts 또는 apt/dnf/pacman/zypper/yum/apk를 실행합니다(관리자/sudo 승인을 요청할 수 있음). 사용할 수 없거나 버전이 맞지 않으면 SHA-256을 검증한 공식 다운로드를 선택할 수 있습니다. Linux의 다운로드 대체 설치에는 `unzip` 또는 `bsdtar`가 필요합니다. 오프라인 환경은 `tosRemote.rclonePath`를 지정하세요. |
 | Python Debugger 확장 (`ms-python.debugpy`) | 원격 디버깅(F5)에 필요 |
 | Jupyter 확장 (`ms-toolsai.jupyter`) | 선택 사항입니다. 보드에서 Jupyter 셀을 실행하려 할 때 설치하세요. |
-| [uv](https://docs.astral.sh/uv/) | 보드 도구 설치에만 필요. 처음 설치할 때 PyPI에서 내려받아 SHA-256을 검증합니다(약 15 MB). 처음 해석할 때 uv용 Python(약 21 MB)도 내려받습니다. 보드 도구를 설치할 때 PC는 인터넷에 연결되어 있어야 합니다. |
+| [uv](https://docs.astral.sh/uv/) | 0.8.0 이상, 보드 도구 설치에만 필요합니다. 이미 설치된 지원 버전을 업데이트 없이 재사용하며, 없으면 OS에 맞는 실행 파일을 PyPI에서 내려받아 SHA-256을 검증합니다. 처음 해석할 때 uv용 Python(약 21 MB)도 내려받습니다. 보드 도구를 설치할 때 PC는 인터넷에 연결되어 있어야 합니다. |
 | 보드의 `debugpy`, `jupyter_server`, `ipykernel` | 없으면 패널(**보드 도구**)에서 설치 |
 
 ## 사용 방법
@@ -60,7 +60,7 @@ PC의 VS Code에서 tOS(tOS-Lite, Raspberry Pi 5) 보드의 작업 공간을 열
 4. **원격 작업 공간 열기**를 누릅니다. 로컬 폴더가 아직 지정되지 않았으면 PC의 폴더를 선택한 뒤 현재 VS Code 창에서 열지, 새 창에서 열지 선택합니다.
 5. 작업이 끝나면 **원격 작업 공간 닫기**를 누릅니다. 보드로 대기 중인 업로드가 모두 끝난 것을 확인한 뒤 세션을 종료합니다.
 
-- 원격 작업 공간은 한 창에서만 열 수 있습니다. 다른 창에 이미 열려 있으면 **그 창으로 이동**을 눌러 VS Code 창 전환기를 여세요. 현재 폴더를 원격 작업 공간으로 덮어쓰지 않습니다. VS Code, Windows 탐색기, 원격 터미널에서 변경한 내용은 양방향으로 동기화되며, 같은 파일을 양쪽에서 수정하면 수정 시각이 더 늦은 쪽을 유지합니다.
+- 원격 작업 공간은 한 창에서만 열 수 있습니다. 다른 창에 이미 열려 있으면 **그 창으로 이동**을 눌러 VS Code 창 전환기를 여세요. 현재 폴더를 원격 작업 공간으로 덮어쓰지 않습니다. VS Code, 파일 관리자, 원격 터미널에서 변경한 내용은 양방향으로 동기화되며, 같은 파일을 양쪽에서 수정하면 수정 시각이 더 늦은 쪽을 유지합니다.
 - 작업 공간을 닫지 않고 VS Code를 종료해도 로컬 작업 사본은 유지되며, 다시 실행하면 자동으로 연결됩니다.
 - 비밀번호로만 연결한 경우 터미널과 **tOS에서 실행**은 매번 비밀번호를 묻습니다. 디버깅·보드 도구·Jupyter는 저장된 비밀번호를 사용합니다. SSH 키 등록을 권장합니다.
 
@@ -93,7 +93,7 @@ print(sys.path)   # 보드에서 실행
 | `tosRemote.debugPort` | `5678` | debugpy 포트 |
 | `tosRemote.pythonLibraryPaths` | (자동 감지) | IntelliSense용으로 복사할 보드 패키지 경로. 지정하면 모두 필수로 처리 |
 | `tosRemote.pathMappings` | `[]` | 터미널 링크용 추가 경로 매핑 |
-| `tosRemote.rclonePath` | (자동 설치) | 직접 준비한 rclone.exe 경로 |
+| `tosRemote.rclonePath` | (자동 설치) | 직접 준비한 rclone 실행 파일 경로 |
 | `tosRemote.packageExcludeNewer` | (비움) | 보드 패키지를 이 날짜 기준 버전으로 설치합니다(예: `2026-10-01`). 모든 PC에 같은 날짜를 지정하면 실습실 보드에 같은 버전이 설치됩니다. 비우면 보드 Python과 호환되는 최신 버전을 사용합니다. |
 | `tosRemote.jupyterAutoSelectKernel` | `true` | 노트북이나 `#%%` 파일을 열면 보드에서 Jupyter를 시작하고 보드 커널을 자동으로 선택합니다. |
 
@@ -104,7 +104,7 @@ print(sys.path)   # 보드에서 실행
 ```
 VS Code (확장) ──HTTP(127.0.0.1, 무작위 포트·계정)──▶ rclone rcd (분리 실행)
      │                                                  │ SFTP
-     │ ssh.exe (터미널·실행·디버그)                      ▼
+     │ ssh (터미널·실행·디버그)                          ▼
      └──────────────────────────────────────────────▶ Dropbear (보드)
                                     로컬 SSD 작업 사본 ◀──▶ 즉시 SFTP 동기화
 ```
@@ -112,17 +112,18 @@ VS Code (확장) ──HTTP(127.0.0.1, 무작위 포트·계정)──▶ rclone
 - rclone은 확장 프로세스와 분리된 제어 서버(`rclone rcd`)로 실행되어 창 재로드·VS Code 종료 후에도 유지됩니다.
 - 작업 공간 파일(`.code-workspace`)은 PC의 확장 저장소에 생성되며 보드에는 아무것도 쓰지 않습니다.
 - 저장 후 실행·디버깅 전에 동기화 대기열을 모두 플러시해 보드에서 이전 파일이 실행되지 않게 합니다.
-- SSH 터미널은 확장 저장소의 `ssh-terminal.cmd`(cmd.exe)로 실행되어 연결 실패 재시도와 종료 코드 처리를 담당합니다. **tOS에서 실행**은 `run-on-tos.cmd`로 실행되며, ssh 명령을 환경 변수로 받아 터미널에 표시되지 않게 합니다.
+- SSH 터미널은 확장 저장소의 플랫폼별 스크립트(Windows는 `.cmd`, Linux/macOS는 `.sh`)로 실행되어 연결 실패 재시도와 종료 코드 처리를 담당합니다. **tOS에서 실행**도 같은 방식으로 ssh 명령을 터미널 출력에서 숨깁니다.
 - Python 라이브러리 동기화는 보드(Dropbear)의 동시 접속 제한을 고려해 SSH 연결을 4개 이내로 사용하며, 작업 공간이 열린 뒤 15초 후에 시작합니다. 보드 도구(debugpy·Jupyter)는 작업 공간을 열 때 같은 SSH 연결에서 확인합니다.
 - 로컬 작업 사본의 파일 변경은 200ms 디바운스 후 보드로 즉시 업로드됩니다(`operations/copyfile` / `operations/deletefile`). 보드에서 직접 생성·수정한 파일은 패널의 **보드에서 가져오기**로 가져옵니다.
-- 보드 도구: PC의 uv가 보드 기준으로 패키지를 해석합니다(보드의 `--python-version`·`--python-platform`, 휠만, 보드에 이미 있는 패키지는 유지). 휠은 PyPI에서 내려받아 SHA-256으로 검증하고, rclone으로 `/tmp/tos-remote.XXXXXX`(권한 0700)에 복사한 뒤 `sudo pip install --no-index --find-links`로 설치합니다. 해석 도구는 확장 저장소(`uv.exe`, uv용 Python)와 `%LOCALAPPDATA%\tOS Remote\uv-cache`에 둡니다.
+- 보드 도구: PC의 uv가 보드 기준으로 패키지를 해석합니다(보드의 `--python-version`·`--python-platform`, 휠만, 보드에 이미 있는 패키지는 유지). `PATH`, `~/.local/bin`, 일반적인 패키지 관리자 실행 경로의 기존 지원 `uv`를 재사용하며, 없으면 OS에 맞는 실행 파일을 PyPI에서 내려받아 SHA-256을 검증합니다. 휠도 PyPI에서 내려받아 검증하고, rclone으로 `/tmp/tos-remote.XXXXXX`(권한 0700)에 복사한 뒤 `sudo pip install --no-index --find-links`로 설치합니다. 해석 자료(uv용 Python 포함)는 확장 저장소에 둡니다. 캐시는 Windows의 `%LOCALAPPDATA%\tOS Remote`, macOS의 `~/Library/Caches/tOS Remote`, Linux의 `$XDG_CACHE_HOME/tOS Remote` 또는 `~/.cache/tOS Remote`에 저장합니다.
 - Jupyter: 서버는 보드 사용자 권한으로 실행되며(`python3 -m jupyter_server`, `127.0.0.1`, 무작위 포트·토큰, 터미널 기능 끔), 상태와 로그는 `~/.local/state/tos-remote`(권한 0700)에 둡니다. PC는 빈 로컬 포트를 `ssh -N -L`로 포워딩하고 Jupyter 확장에 등록합니다(`createJupyterServerCollection`). 포워딩이 끊기면 서버가 실행 중인 동안 자동으로 다시 연결합니다.
-- 비밀번호 인증에서는 화면 없이 실행하는 ssh 명령이 저장된 비밀번호를 `SSH_ASKPASS`로 받습니다. 작은 도우미(`askpass.cmd`, VS Code에 포함된 Node.js로 실행)가 확장이 연 일회용 named pipe에서 읽습니다.
+- 비밀번호 인증에서는 화면 없이 실행하는 ssh 명령이 저장된 비밀번호를 `SSH_ASKPASS`로 받습니다. 작은 도우미 스크립트(Windows는 `.cmd`, Linux/macOS는 `.sh`)가 VS Code의 Node.js를 실행해 확장이 연 일회용 로컬 채널에서 읽습니다.
 
 ## 보안 참고
 
 - 보드 재설치로 호스트 키가 바뀌어도 접속되도록 **SSH 호스트 키를 검증하지 않습니다**. 신뢰할 수 있는 네트워크(직결·실습망)에서 사용하세요.
 - 원격 디버깅 중 debugpy는 보드의 `127.0.0.1:5678`(루프백)에서만 연결을 기다리며, SSH 터널을 통해 안전하게 통신합니다.
+- 디버거에서 연결을 끊어도 원격 프로세스와 SSH 터널은 유지됩니다. 프로세스가 끝난 뒤 다시 시작하면 원격 디버그 프로세스를 새로 준비합니다.
 - rclone 제어 서버는 `127.0.0.1`에서만 열리며 실행할 때마다 무작위 계정·비밀번호를 사용합니다.
 - Jupyter 서버는 보드의 `127.0.0.1`에서만 열리고 무작위 토큰을 요구하며, SSH 터널로만 접속합니다.
 - 보드 패키지는 sudo로 전역 Python 환경에 설치합니다. 이 기능은 sudo 비밀번호를 저장하지 않으며, 패널에 저장한 보드 비밀번호가 있으면 다시 사용합니다.
@@ -143,6 +144,7 @@ media/          사이드바 패널(html/css/js), 아이콘, 시작 가이드 �
 l10n/           런타임 문자열 한국어 번역 (bundle.l10n.ko.json, 원문은 소스의 영어)
 package.nls*.json  매니페스트 문자열 (영어 기본, .ko 한국어)
 test/run.js     단위 테스트 (node test/run.js, 번역 누락·자리표시자 검사 포함)
+test/install.js 플랫폼별 실제 다운로드·설치 검증 후 로컬 SFTP 서버를 이용한 전체 테스트
 test/integration/  VS Code 확장 호스트 통합 테스트 (보드 대신 로컬 rclone SFTP 서버, 영어·한국어 표시 언어)
 scripts/build-vsix.ps1         Node와 빌드 도구 없이 Marketplace에 업로드할 .vsix 생성
 scripts/integration-test.ps1   통합 테스트 실행
@@ -150,6 +152,7 @@ scripts/integration-test.ps1   통합 테스트 실행
 
 ```powershell
 node test/run.js                       # 단위 테스트
+node test/install.js                   # rclone·uv 다운로드·검증 후 실제 SFTP를 포함한 전체 테스트
 .\scripts\build-vsix.ps1               # dist\tos-remote-<버전>.vsix (Node·빌드 도구 불필요)
 .\scripts\integration-test.ps1 -CodePath <Code.exe>
 ```
@@ -157,6 +160,10 @@ node test/run.js                       # 단위 테스트
 생성된 `.vsix` 파일을 Visual Studio Marketplace 게시자 페이지에서 업로드합니다. 확장 패키징에 Node.js나 `vsce` 설치가 필요하지 않습니다.
 
 통합 테스트는 다른 VS Code 인스턴스가 같은 사용자 데이터로 실행 중이면 시작할 수 없습니다. 포터블 VS Code를 사용 중이라면 `data` 폴더를 제외한 복사본의 `Code.exe`를 지정하세요.
+
+단위 테스트는 모든 플랫폼에서 실행할 수 있습니다. 제공된 통합 테스트 실행 스크립트는 Windows용 PowerShell이며, 확장 호스트 테스트 코드는 OS 독립 경로를 사용하므로 Linux/macOS에서는 VS Code에서 직접 실행할 수 있습니다.
+
+CI는 Windows·Linux·macOS에서 설치기와 SFTP 테스트를 통과한 뒤 모든 플랫폼에 공통인 VSIX를 만듭니다. 플랫폼별 네이티브 실행 파일은 확장에 포함하지 않습니다.
 
 ### 다국어
 
@@ -170,4 +177,4 @@ node test/run.js                       # 단위 테스트
 
 [GPL-3.0-or-later](LICENSE). Copyright (C) PlanXLab.
 
-이 확장은 rclone, uv를 포함하지 않습니다. rclone(MIT)은 처음 사용할 때 공식 사이트에서 내려받고, uv(MIT 또는 Apache-2.0)는 보드 도구를 처음 설치할 때 PyPI에서 내려받습니다. 보드 패키지(debugpy, Jupyter)는 설치할 때 PyPI에서 내려받습니다.
+이 확장은 rclone, uv를 포함하지 않습니다. 가능한 경우 PC에 이미 설치된 지원 버전을 사용합니다. 그 외에는 rclone(MIT)을 사용 가능한 패키지 관리자로 설치하거나 공식 사이트에서 내려받아 SHA-256을 검증하고, uv(MIT 또는 Apache-2.0)는 보드 도구를 처음 설치할 때 PyPI에서 내려받아 SHA-256을 검증합니다. 보드 패키지(debugpy, Jupyter)는 설치할 때 PyPI에서 내려받습니다.

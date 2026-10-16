@@ -1,9 +1,10 @@
 'use strict';
 
 // SSH 비밀번호 인증을 화면 없이 처리한다 (SSH_ASKPASS).
-// ssh.exe가 실행하는 askpass.cmd가 Code.exe를 Node로 실행해 askpassHelper.js를 돌리고,
+// OpenSSH가 실행하는 askpass 스크립트가 VS Code의 Node.js로 askpassHelper.js를 돌리고,
 // 도우미는 확장이 연 일회용 named pipe에 토큰을 보내 비밀번호를 받는다.
 // 비밀번호는 명령줄·환경 변수·파일에 남기지 않는다 (환경 변수에는 파이프 이름과 일회용 토큰만 둔다).
+const fs = require('fs');
 const net = require('net');
 const path = require('path');
 const crypto = require('crypto');
@@ -15,7 +16,7 @@ const MAX_ANSWERS = 2;
 
 /**
  * askpass.cmd 내용. cmd는 배치 파일을 OEM 코드 페이지로 읽으므로 사용자 이름이 들어가는 경로를 넣지 않는다(ASCII만).
- * Code.exe와 도우미 경로는 환경 변수(유니코드)로 받는다. 확장된 값의 %는 다시 해석되지 않고 따옴표 안의 & ^는 그대로 쓰인다.
+ * 실행 파일과 도우미 경로는 환경 변수로 받아 cmd 특수 문자를 다시 해석하지 않는다.
  */
 function buildAskpassCmd() {
     return [
@@ -25,6 +26,14 @@ function buildAskpassCmd() {
         '"%TOS_ASKPASS_NODE%" "%TOS_ASKPASS_HELPER%"',
         ''
     ].join('\r\n');
+}
+
+function buildAskpassSh() {
+    return [
+        '#!/bin/sh',
+        'ELECTRON_RUN_AS_NODE=1 exec "$TOS_ASKPASS_NODE" "$TOS_ASKPASS_HELPER"',
+        ''
+    ].join('\n');
 }
 
 function sameToken(a, b) {
@@ -45,7 +54,7 @@ class AskpassBroker {
     }
 
     get scriptPath() {
-        return path.join(this.storageDir, 'askpass.cmd');
+        return path.join(this.storageDir, process.platform === 'win32' ? 'askpass.cmd' : 'askpass.sh');
     }
 
     /**
@@ -53,9 +62,13 @@ class AskpassBroker {
      * @returns {Promise<{env: Record<string, string>, dispose: () => void}>}
      */
     async open(secret) {
-        writeIfChanged(this.scriptPath, buildAskpassCmd());
+        const windows = process.platform === 'win32';
+        writeIfChanged(this.scriptPath, windows ? buildAskpassCmd() : buildAskpassSh());
+        if (!windows) {
+            fs.chmodSync(this.scriptPath, 0o700);
+        }
         const token = crypto.randomBytes(24).toString('hex');
-        const pipe = `${PIPE_PREFIX}${crypto.randomBytes(12).toString('hex')}`;
+        const pipe = windows ? `${PIPE_PREFIX}${crypto.randomBytes(12).toString('hex')}` : undefined;
         let answers = 0;
         const server = net.createServer((socket) => {
             let data = '';
@@ -74,8 +87,13 @@ class AskpassBroker {
         });
         await new Promise((resolve, reject) => {
             server.once('error', reject);
-            server.listen(pipe, resolve);
+            if (windows) {
+                server.listen(pipe, resolve);
+            } else {
+                server.listen(0, '127.0.0.1', resolve);
+            }
         });
+        const address = server.address();
         let closed = false;
         const dispose = () => {
             if (!closed) {
@@ -85,21 +103,25 @@ class AskpassBroker {
             }
         };
         const timer = setTimeout(dispose, SESSION_TIMEOUT_MS);
+        const env = {
+            SSH_ASKPASS: this.scriptPath,
+            SSH_ASKPASS_REQUIRE: 'force',
+            DISPLAY: process.env.DISPLAY || 'localhost:0',
+            TOS_ASKPASS_NODE: this.nodeExecutable,
+            TOS_ASKPASS_HELPER: this.helperScript,
+            TOS_ASKPASS_TOKEN: token
+        };
+        if (windows) {
+            env.TOS_ASKPASS_PIPE = pipe;
+        } else {
+            env.TOS_ASKPASS_HOST = address.address;
+            env.TOS_ASKPASS_PORT = String(address.port);
+        }
         return {
-            env: {
-                SSH_ASKPASS: this.scriptPath,
-                // OpenSSH 8.4 이상
-                SSH_ASKPASS_REQUIRE: 'force',
-                // Windows 10 기본 OpenSSH(8.1)는 DISPLAY가 있어야 SSH_ASKPASS를 사용한다 (8.4 이상에서는 영향 없음)
-                DISPLAY: process.env.DISPLAY || 'localhost:0',
-                TOS_ASKPASS_NODE: this.nodeExecutable,
-                TOS_ASKPASS_HELPER: this.helperScript,
-                TOS_ASKPASS_PIPE: pipe,
-                TOS_ASKPASS_TOKEN: token
-            },
+            env,
             dispose
         };
     }
 }
 
-module.exports = { AskpassBroker, buildAskpassCmd };
+module.exports = { AskpassBroker, buildAskpassCmd, buildAskpassSh };

@@ -1,9 +1,8 @@
 'use strict';
 
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
-const { shellQuote, normalizeRemotePath, lastLine, noopLogger } = require('./util');
+const { shellQuote, normalizeRemotePath, lastLine, noopLogger, userCacheDirectory } = require('./util');
 const { sftpEnv } = require('./rclone');
 const { TOOLS_PROBE_PY, parseProbeOutput } = require('./boardScripts');
 
@@ -35,7 +34,7 @@ function sessionLibraries(session) {
 }
 
 function cacheRoot() {
-    return path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'tOS Remote', 'python-libs');
+    return path.join(userCacheDirectory('tOS Remote'), 'python-libs');
 }
 
 function localCachePath(remotePath) {

@@ -1,14 +1,29 @@
 'use strict';
 
-// VS Code 터미널에서 cmd.exe로 실행할 SSH 터미널 배치 파일을 만든다.
+const path = require('path');
+const { shellQuote } = require('./util');
+const { t } = require('./i18n');
+
+// VS Code 터미널에서 실행할 SSH 스크립트를 만든다.
 // - 세션이 정상 종료되면 원격 셸의 종료 코드와 관계없이 0으로 끝내 "terminated with exit code" 알림이 뜨지 않게 한다.
 // - ssh가 255(연결 단계 실패 등)로 끝나면 잠시 후 다시 시도하고, 최종 실패 시 원인을 남기고 키 입력을 기다린다.
-// cmd.exe는 콘솔 프로그램이라 ConPTY에 연결되며, 자식 ssh.exe가 같은 콘솔을 그대로 사용한다.
-// (VS Code의 Code.exe는 GUI 프로그램이라 ConPTY에 연결되지 않아 래퍼로 쓸 수 없다)
-const { t } = require('./i18n');
+// Windows는 cmd 배치 파일, Linux/macOS는 POSIX 셸 스크립트를 사용한다.
 
 const MAX_ATTEMPTS = 3;
 const RETRY_DELAY_SECONDS = 2;
+const POSIX_ATTEMPT_TOKEN = '__TOS_ATTEMPT__';
+
+const WAIT_FOR_KEY = [
+    'if [ -t 0 ]; then',
+    '    saved_tty=$(stty -g)',
+    '    trap \'stty "$saved_tty"\' 0',
+    '    trap \'exit 0\' 1 2 15',
+    '    stty -icanon -echo min 1 time 0',
+    '    dd bs=1 count=1 >/dev/null 2>&1',
+    '    stty "$saved_tty"',
+    '    trap - 0 1 2 15',
+    'fi'
+];
 
 // Windows C 런타임 규칙에 맞춘 명령줄 인자 인용 (libuv quote_cmd_arg와 같은 방식)
 function quoteWindowsArg(arg) {
@@ -40,12 +55,45 @@ function echoLine(text) {
     return `echo ${escaped.split(ATTEMPT_TOKEN).join('%TOS_ATTEMPT%')}`;
 }
 
+function buildPosixSshTerminalScript(sshPath, sshArgs) {
+    const commandLine = [sshPath, ...sshArgs].map(shellQuote).join(' ');
+    const retryParts = t('Could not connect to the board. Retrying in {0} seconds ({1}/{2})',
+        RETRY_DELAY_SECONDS, POSIX_ATTEMPT_TOKEN, MAX_ATTEMPTS).split(POSIX_ATTEMPT_TOKEN);
+    const failedMessage = shellQuote(`[tOS] ${t('Could not connect to the board over SSH ({0} attempts). Check the board power and network.', MAX_ATTEMPTS)}`);
+    const retryLine = `${shellQuote(`[tOS] ${retryParts[0]}`)}"$attempt"${shellQuote(retryParts[1])}`;
+    return [
+        '#!/bin/sh',
+        'attempt=0',
+        'while :; do',
+        '    attempt=$((attempt + 1))',
+        `    ${commandLine}`,
+        '    status=$?',
+        '    if [ "$status" -ne 255 ]; then',
+        '        exit 0',
+        '    fi',
+        `    if [ "$attempt" -ge ${MAX_ATTEMPTS} ]; then`,
+        `        printf '%s\\n' ${failedMessage}`,
+        `        printf '%s' ${shellQuote(t('Press any key to close the terminal.'))}`,
+        ...WAIT_FOR_KEY.map((line) => `        ${line}`),
+        '        exit 0',
+        '    fi',
+        `    printf '%s\\n' ${retryLine}`,
+        `    sleep ${RETRY_DELAY_SECONDS}`,
+        'done',
+        ''
+    ].join('\n');
+}
+
 /**
- * @param {string} sshPath ssh.exe 경로
+ * @param {string} sshPath ssh 실행 파일 경로
  * @param {string[]} sshArgs ssh 인자 (원격 명령 포함)
- * @returns {string} 배치 파일 내용 (CRLF, UTF-8)
+ * @param {string} [platform] 실행할 플랫폼
+ * @returns {string} 셸 스크립트 내용
  */
-function buildSshTerminalScript(sshPath, sshArgs) {
+function buildSshTerminalScript(sshPath, sshArgs, platform = process.platform) {
+    if (platform !== 'win32') {
+        return buildPosixSshTerminalScript(sshPath, sshArgs);
+    }
     const commandLine = [sshPath, ...sshArgs].map(quoteWindowsArg).join(' ');
     // cmd 특수 문자가 인용 밖으로 노출되지 않도록 방어 (ssh 인자에는 원래 포함되지 않는다)
     if (/[&|<>^\r\n]/.test(commandLine)) {
@@ -81,7 +129,28 @@ function buildSshTerminalScript(sshPath, sshArgs) {
  * - 실행 완료를 터미널에 표시하고 키 입력을 기다려 사용자가 종료를 확인할 수 있게 한다.
  * - 프로그램이 다시 실행되지 않도록 재시도하지 않는다.
  */
-function buildRunScript() {
+function buildPosixRunScript(sshPath, sshArgs) {
+    const commandLine = [sshPath, ...sshArgs].map(shellQuote).join(' ');
+    return [
+        '#!/bin/sh',
+        commandLine,
+        'status=$?',
+        'if [ "$status" -eq 255 ]; then',
+        `    printf '%s\\n' ${shellQuote(`[tOS] ${t('The connection to the board failed or was lost (ssh exit code 255).')}`)}`,
+        `    printf '%s' ${shellQuote(t('Press any key to close the terminal.'))}`,
+        'else',
+        `    printf '%s\\n' ${shellQuote(`[tOS] ${t('Terminated, press any key to close the terminal.')}`)}`,
+        'fi',
+        ...WAIT_FOR_KEY,
+        'exit 0',
+        ''
+    ].join('\n');
+}
+
+function buildRunScript(sshPath, sshArgs, platform = process.platform) {
+    if (platform !== 'win32') {
+        return buildPosixRunScript(sshPath, sshArgs);
+    }
     return [
         '@echo off',
         'chcp 65001 >nul',
@@ -102,7 +171,21 @@ function buildRunScript() {
     ].join('\r\n');
 }
 
-/** 실행 배치 파일에 넘길 환경 변수 */
+function terminalScriptPath(storageDir, name, platform = process.platform) {
+    return path.join(storageDir, `${name}${platform === 'win32' ? '.cmd' : '.sh'}`);
+}
+
+function terminalShellLaunch(scriptPath, platform = process.platform) {
+    if (platform === 'win32') {
+        return {
+            shellPath: process.env.ComSpec || path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe'),
+            shellArgs: ['/d', '/c', scriptPath]
+        };
+    }
+    return { shellPath: '/bin/sh', shellArgs: [scriptPath] };
+}
+
+/** Windows 실행 배치 파일에 넘길 환경 변수 */
 function runScriptEnv(sshPath, sshArgs) {
     return {
         TOS_SSH_EXE: quoteWindowsArg(sshPath),
@@ -110,4 +193,7 @@ function runScriptEnv(sshPath, sshArgs) {
     };
 }
 
-module.exports = { buildSshTerminalScript, buildRunScript, runScriptEnv, quoteWindowsArg, echoLine };
+module.exports = {
+    buildSshTerminalScript, buildRunScript, runScriptEnv, quoteWindowsArg, echoLine,
+    terminalScriptPath, terminalShellLaunch
+};

@@ -27,6 +27,10 @@ const MOUNT_OPTIONS = {
     AttrTimeout: '1s'
 };
 
+function isRcloneImage(name) {
+    return /^rclone(?:\.exe)?$/i.test(path.basename(String(name || '')));
+}
+
 function compareVersions(a, b) {
     const pa = String(a).split('.').map(Number);
     const pb = String(b).split('.').map(Number);
@@ -147,7 +151,7 @@ class Rclone {
         try {
             const result = await runProcess(exe, ['version'], { timeoutMs: 15000 });
             const match = /rclone v(\d+\.\d+\.\d+)/.exec(result.stdout);
-            return match ? match[1] : undefined;
+            return result.code === 0 && match ? match[1] : undefined;
         } catch {
             return undefined;
         }
@@ -196,7 +200,7 @@ class Rclone {
         if (await this.isDaemonAlive(existing)) {
             return existing;
         }
-        if (existing && isProcessAlive(existing.pid) && (await getProcessImageName(existing.pid)) === 'rclone.exe') {
+        if (existing && isProcessAlive(existing.pid) && isRcloneImage(await getProcessImageName(existing.pid))) {
             this.logger.warn(`Killing unresponsive rclone daemon (pid ${existing.pid})`);
             try {
                 process.kill(existing.pid);
@@ -208,7 +212,7 @@ class Rclone {
 
         const exe = this.exePath;
         if (!exe || !fs.existsSync(exe)) {
-            throw new Error(t('rclone.exe is missing. Install rclone first.'));
+            throw new Error(t('rclone is missing. Install rclone first.'));
         }
         fs.mkdirSync(this.storageDir, { recursive: true });
         fs.mkdirSync(this.cacheDir, { recursive: true });
@@ -290,7 +294,7 @@ class Rclone {
         for (let i = 0; i < 25 && isProcessAlive(state.pid); i++) {
             await sleep(200);
         }
-        if (isProcessAlive(state.pid) && (await getProcessImageName(state.pid)) === 'rclone.exe') {
+        if (isProcessAlive(state.pid) && isRcloneImage(await getProcessImageName(state.pid))) {
             try {
                 process.kill(state.pid);
             } catch {
@@ -342,12 +346,12 @@ class Rclone {
             mountOpt: MOUNT_OPTIONS
         }, 60000);
         for (let i = 0; i < 75; i++) {
-            if (fs.existsSync(`${drive}\\`)) {
+            if (fs.existsSync(process.platform === 'win32' ? `${drive}\\` : drive)) {
                 return;
             }
             await sleep(200);
         }
-        throw new Error(t('Drive {0} did not appear. Check the WinFsp installation and the rclone log.', drive));
+        throw new Error(t('Mount point {0} did not appear. Check the mount permissions and the rclone log.', drive));
     }
 
     async unmount(drive) {
@@ -375,7 +379,7 @@ class Rclone {
     runCli(args, options = {}) {
         const exe = this.exePath;
         if (!exe || !fs.existsSync(exe)) {
-            throw new Error(t('rclone.exe is missing. Install rclone first.'));
+            throw new Error(t('rclone is missing. Install rclone first.'));
         }
         return runProcess(exe, [...args, `--config=${this.configFile}`], {
             env: { ...process.env, ...(options.env || {}) },

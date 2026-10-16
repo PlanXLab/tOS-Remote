@@ -4,11 +4,12 @@
 // 실행: scripts/integration-test.ps1
 // 환경 변수: TOS_IT_OUT(결과 파일), TOS_IT_SERVE_DIR(SFTP 루트), TOS_IT_PORT(SFTP 포트)
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const assert = require('assert');
 const { spawn } = require('child_process');
 const vscode = require('vscode');
-const { probeTcp, isProcessAlive } = require('../../src/util');
+const { probeTcp, isProcessAlive, samePath } = require('../../src/util');
 const { getSettings, targetOf } = require('../../src/settings');
 
 const out = process.env.TOS_IT_OUT;
@@ -36,7 +37,7 @@ async function run() {
     // 보드 대신 사용할 SFTP 서버. 테스트가 서버 폴더에 직접 쓰는 파일이 바로 보이도록 디렉터리 캐시를 끈다.
     const startServer = async () => {
         server = spawn(api.prereq.rcloneExePath(), ['serve', 'sftp', serveDir, '--addr', `127.0.0.1:${port}`, '--user', 'tos', '--pass', 'secret',
-            '--config', 'NUL', '--dir-cache-time', '100ms'], { windowsHide: true });
+            '--config', process.platform === 'win32' ? 'NUL' : os.devNull, '--dir-cache-time', '100ms'], { windowsHide: true });
         for (let i = 0; i < 50; i++) {
             await new Promise((resolve) => setTimeout(resolve, 200));
             const probe = await probeTcp('127.0.0.1', port, 1000);
@@ -70,13 +71,23 @@ async function run() {
 
         await step('사전 점검 (ssh)', async () => {
             const state = await api.prereq.refresh();
-            assert.ok(state.ssh, 'ssh.exe not found');
+            assert.ok(state.ssh, 'OpenSSH client not found');
             return `ssh=${state.ssh}`;
         });
 
+        await step('패키지 관리자 작업 실행·종료 코드 수신 (설치 없이 SSH 버전으로 검증)', async () => {
+            const code = await api.prereq.runPackageManager({
+                label: 'OpenSSH test',
+                command: api.ssh.sshPath,
+                args: ['-V']
+            });
+            assert.strictEqual(code, 0);
+        });
+
         await step('rclone 내려받기·검증·설치', async () => {
-            const result = await api.prereq.installRclone();
+            const result = await api.prereq.installRclone({ usePackageManager: false });
             assert.ok(result && fs.existsSync(result.exePath), 'rclone not installed');
+            fs.writeFileSync(path.join(path.dirname(serveDir), 'rclone-path.txt'), result.exePath, 'utf8');
             const state = await api.prereq.refresh();
             assert.strictEqual(state.rcloneVersion, result.version);
             return `v${result.version} → ${result.exePath}`;
@@ -278,7 +289,7 @@ async function runPhaseKo() {
         const { webviewStrings } = require('../../src/panel');
         assert.strictEqual(webviewStrings().openWorkspace, '▶ 원격 작업 공간 열기');
         const { buildSshTerminalScript } = require('../../src/sshTerminal');
-        assert.ok(buildSshTerminalScript('C:\\ssh.exe', ['-p', '22']).includes('보드 연결 실패'));
+        assert.ok(buildSshTerminalScript('C:\\ssh.exe', ['-p', '22'], 'win32').includes('보드 연결 실패'));
         return t('Run on tOS: {0}', 'a.py');
     });
     await step('[ko] 사이드바 패널 표시', async () => {
@@ -318,14 +329,17 @@ async function runPhase2() {
         const folder = vscode.workspace.workspaceFolders[0];
 
         await step('[2단계] 작업 공간 설정 (폴더·터미널·launch·Pylance)', async () => {
-            assert.strictEqual(folder.uri.fsPath.toUpperCase(), path.normalize(session.localWorkspace).toUpperCase());
+            assert.ok(samePath(folder.uri.fsPath, session.localWorkspace));
             const terminal = vscode.workspace.getConfiguration('terminal.integrated');
-            const profileName = terminal.get('defaultProfile.windows');
+            const platform = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'osx' : 'linux';
+            const profileName = terminal.get(`defaultProfile.${platform}`);
             assert.strictEqual(profileName, 'tOS SSH');
-            const profile = terminal.get('profiles.windows')[profileName];
-            assert.ok(/cmd\.exe$/i.test(profile.path), profile.path);
-            assert.ok(fs.existsSync(profile.args[2]), 'ssh-terminal.cmd missing');
-            assert.ok(fs.readFileSync(profile.args[2], 'utf8').includes('if not errorlevel 255 exit /b 0'));
+            const profile = terminal.get(`profiles.${platform}`)[profileName];
+            const scriptPath = process.platform === 'win32' ? profile.args[2] : profile.args[0];
+            assert.ok(process.platform === 'win32' ? /cmd\.exe$/i.test(profile.path) : profile.path === '/bin/sh', profile.path);
+            assert.ok(fs.existsSync(scriptPath), 'SSH terminal script missing');
+            assert.ok(fs.readFileSync(scriptPath, 'utf8').includes(process.platform === 'win32'
+                ? 'if not errorlevel 255 exit /b 0' : 'if [ "$status" -ne 255 ]; then'));
             const launch = vscode.workspace.getConfiguration('launch', folder.uri).get('configurations');
             assert.strictEqual(launch[0].type, 'tos-remote');
             assert.strictEqual(vscode.workspace.getConfiguration('files').get('eol'), '\n');
@@ -338,11 +352,11 @@ async function runPhase2() {
         await step('[2단계] 실행 대상 경로 변환', async () => {
             const target = api.runner.resolveTarget(vscode.Uri.file(inferFile));
             assert.strictEqual(target.relativePath, 'vision/infer.py');
-            assert.throws(() => api.runner.resolveTarget(vscode.Uri.file('C:\\Windows\\win.ini')));
+            assert.throws(() => api.runner.resolveTarget(vscode.Uri.file(path.join(os.tmpdir(), 'outside-workspace.py'))));
         });
 
         await step('[2단계] 기본 터미널(SSH) 생성 후 즉시 종료되지 않음', async () => {
-            const terminal = vscode.window.createTerminal({ name: 'it' });
+            const terminal = vscode.window.createTerminal({ name: 'tOS SSH' });
             await sleep(4000);
             assert.strictEqual(terminal.exitStatus, undefined, `terminal exited: ${JSON.stringify(terminal.exitStatus)}`);
             terminal.dispose();
@@ -356,7 +370,7 @@ async function runPhase2() {
             await provider.handleTerminalLink(links[0]);
             const editor = vscode.window.activeTextEditor;
             assert.ok(editor, 'no editor opened');
-            assert.strictEqual(editor.document.uri.fsPath.toUpperCase(), inferFile.toUpperCase());
+            assert.ok(samePath(editor.document.uri.fsPath, inferFile));
             assert.strictEqual(editor.selection.active.line, 0);
         });
 
@@ -385,11 +399,18 @@ async function runPhase2() {
             return name;
         });
 
-        await step('[2단계] 실행 작업은 명령줄을 숨긴다 (cmd 배치 + 환경 변수, echo 끔)', async () => {
-            const script = path.join(api.sessionMgr.storageDir, 'run-on-tos.cmd');
+        await step('[2단계] 실행 작업은 플랫폼별 스크립트로 명령줄을 숨긴다', async () => {
+            const { terminalScriptPath } = require('../../src/sshTerminal');
+            const script = terminalScriptPath(api.sessionMgr.storageDir, 'run-on-tos');
             const content = fs.readFileSync(script, 'utf8');
-            assert.ok(content.includes('!TOS_SSH_EXE! !TOS_SSH_ARGS!'), 'run script must take ssh from environment variables');
-            assert.ok(!/ssh\.exe/i.test(content), 'run script must not contain the ssh command line');
+            if (process.platform === 'win32') {
+                assert.ok(content.includes('!TOS_SSH_EXE! !TOS_SSH_ARGS!'), 'run script must take ssh from environment variables');
+                assert.ok(!/ssh\.exe/i.test(content), 'run script must not contain the ssh command line');
+            } else {
+                assert.ok(content.startsWith('#!/bin/sh\n'));
+                assert.ok(content.includes('status=$?'));
+                assert.ok(!content.includes('set -x'), 'the SSH command must not be echoed');
+            }
         });
 
         await step('[2단계] Run 버튼 메뉴 "Run on tOS" (tosRemote.runFile)', async () => {

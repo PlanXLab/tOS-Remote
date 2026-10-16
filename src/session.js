@@ -9,7 +9,7 @@ const {
 } = require('./util');
 const { sftpConnectionString } = require('./rclone');
 const { buildWorkspace, sshTerminalArgs } = require('./workspaceFile');
-const { buildSshTerminalScript } = require('./sshTerminal');
+const { buildSshTerminalScript, terminalScriptPath, terminalShellLaunch } = require('./sshTerminal');
 const { isAuthError } = require('./auth');
 const { getSettings, validateSettings, targetOf } = require('./settings');
 const pyLibs = require('./pyLibs');
@@ -54,8 +54,12 @@ class SessionManager {
         this.libSyncRunning = false;
         this.cachedSession = this.readSession();
         this.status = { phase: 'idle', session: this.cachedSession, mounted: false, pendingUploads: 0, daemon: false };
+        this.statusRefreshId = 0;
         this.disposed = false;
         this.closeRequested = false;
+        this.closeTimer = undefined;
+        this.sharedStateWatcher = undefined;
+        this.workspaceChangeListener = undefined;
         this.watchdogFailures = 0;
         this.onBeforeClose = undefined;
         this.syncer = new Syncer({
@@ -94,6 +98,41 @@ class SessionManager {
         this.cachedSession = undefined;
     }
 
+    watchSharedState() {
+        if (this.sharedStateWatcher) {
+            return;
+        }
+        try {
+            const watchedNames = [path.basename(this.sessionFile), path.basename(this.ownerFile)];
+            const watcher = fs.watch(path.dirname(this.sessionFile), (_event, filename) => {
+                if (this.disposed) {
+                    return;
+                }
+                const changed = filename && filename.toString();
+                if (!changed || watchedNames.some((name) => changed === name || changed.startsWith(`${name}.`))) {
+                    this.refreshStatus().catch((error) => this.log.debug(`Shared session refresh error: ${error.message}`));
+                }
+            });
+            watcher.on('error', (error) => {
+                this.log.warn(`Shared session watcher failed; status polling remains enabled: ${error.message}`);
+                watcher.close();
+                if (this.sharedStateWatcher === watcher) {
+                    this.sharedStateWatcher = undefined;
+                }
+            });
+            this.sharedStateWatcher = watcher;
+        } catch (error) {
+            this.log.warn(`Shared session watcher unavailable; status polling remains enabled: ${error.message}`);
+        }
+    }
+
+    onWorkspaceChanged() {
+        if (this.closeRequested && !this.isOwnerWindow()) {
+            this.completeCloseRequest().catch((error) => this.log.error(`Could not finish closing the remote workspace: ${error.message}`));
+        }
+        this.refreshStatus().catch((error) => this.log.debug(`Status refresh error: ${error.message}`));
+    }
+
     isOwnerWindow() {
         const file = vscode.workspace.workspaceFile;
         return !!file && file.scheme === 'file' && samePath(file.fsPath, this.workspaceFile);
@@ -116,6 +155,15 @@ class SessionManager {
         this.heartbeatTimer = setInterval(beat, HEARTBEAT_MS);
     }
 
+    stopHeartbeat() {
+        clearInterval(this.heartbeatTimer);
+        this.heartbeatTimer = undefined;
+        const owner = readJson(this.ownerFile);
+        if (owner && owner.pid === process.pid) {
+            removeFile(this.ownerFile);
+        }
+    }
+
     setBusy(value) {
         this.busy = value;
         this.status = { ...this.status, phase: this.computePhase(this.status) };
@@ -125,6 +173,9 @@ class SessionManager {
     computePhase(status) {
         if (this.busy) {
             return this.busy;
+        }
+        if (status.session && status.session.state === 'closing') {
+            return 'closing';
         }
         if (this.isOwnerWindow()) {
             return 'open';
@@ -141,6 +192,7 @@ class SessionManager {
     }
 
     async refreshStatus() {
+        const refreshId = ++this.statusRefreshId;
         const session = this.readSession();
         this.cachedSession = session;
         let daemon = false;
@@ -160,9 +212,13 @@ class SessionManager {
                 }
             }
         }
+        if (refreshId !== this.statusRefreshId) {
+            return this.status;
+        }
         const status = { session, daemon, mounted, pendingUploads, libSyncRunning: this.libSyncRunning };
         status.phase = this.computePhase(status);
         this.status = status;
+        vscode.commands.executeCommand('setContext', 'tosRemote.workspaceOpen', this.isOwnerWindow());
         vscode.commands.executeCommand('setContext', 'tosRemote.mounted', mounted);
         this.emitter.fire(status);
         return status;
@@ -175,6 +231,10 @@ class SessionManager {
     // ---------------------------------------------------------------- 초기화
 
     async initialize() {
+        this.watchSharedState();
+        if (!this.workspaceChangeListener) {
+            this.workspaceChangeListener = vscode.workspace.onDidChangeWorkspaceFolders(() => this.onWorkspaceChanged());
+        }
         vscode.commands.executeCommand('setContext', 'tosRemote.workspaceOpen', this.isOwnerWindow());
         try {
             if (this.isOwnerWindow()) {
@@ -512,22 +572,21 @@ class SessionManager {
 
     /** 작업 공간 터미널 프로필과 같은 SSH 터미널 실행 정보 */
     terminalLaunch() {
-        const scriptPath = path.join(this.storageDir, 'ssh-terminal.cmd');
-        return {
-            shellPath: path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe'),
-            shellArgs: ['/d', '/c', scriptPath],
-            scriptPath
-        };
+        const scriptPath = terminalScriptPath(this.storageDir, 'ssh-terminal');
+        return { ...terminalShellLaunch(scriptPath), scriptPath };
     }
 
     writeWorkspaceFile(session) {
         const target = { host: session.host, port: session.port, user: session.user };
         const sshArgs = this.ssh.baseArgs(target, { keyPath: session.authType === 'key' ? session.keyPath : undefined });
 
-        // SSH 터미널은 cmd 배치 파일로 실행한다 (연결 실패 재시도, 종료 코드 알림 방지)
+        // SSH 터미널 스크립트가 연결 실패 재시도와 종료 코드 알림 방지를 담당한다
         const launch = this.terminalLaunch();
         const script = buildSshTerminalScript(this.ssh.sshPath, sshTerminalArgs(sshArgs, target, session.remoteWorkspace));
         writeIfChanged(launch.scriptPath, script);
+        if (process.platform !== 'win32') {
+            fs.chmodSync(launch.scriptPath, 0o700);
+        }
 
         const content = JSON.stringify(buildWorkspace({
             localWorkspace: session.localWorkspace,
@@ -536,6 +595,7 @@ class SessionManager {
             remoteWorkspace: session.remoteWorkspace,
             sshPath: this.ssh.sshPath,
             sshArgs,
+            platform: process.platform,
             terminal: {
                 path: launch.shellPath,
                 args: launch.shellArgs
@@ -612,18 +672,25 @@ class SessionManager {
             }
             this.closeRequested = true;
             this.setBusy('closing');
-            setTimeout(() => {
+            this.closeTimer = setTimeout(() => {
                 if (this.disposed || !this.closeRequested) {
                     return;
                 }
-                this.closeRequested = false;
-                const current = this.readSession();
-                if (current && current.state === 'closing') {
-                    this.writeSession({ ...current, state: 'open' });
+                if (!this.isOwnerWindow()) {
+                    this.completeCloseRequest().catch((error) => this.log.error(`Could not finish closing the remote workspace: ${error.message}`));
+                } else {
+                    this.cancelCloseRequest().catch((error) => this.log.error(`Could not restore the remote workspace state: ${error.message}`));
                 }
-                this.setBusy(undefined);
             }, 15000);
-            await vscode.commands.executeCommand('workbench.action.closeFolder');
+            try {
+                await vscode.commands.executeCommand('workbench.action.closeFolder');
+                if (!this.isOwnerWindow()) {
+                    await this.completeCloseRequest();
+                }
+            } catch (error) {
+                await this.cancelCloseRequest();
+                throw error;
+            }
             return;
         }
         if (session && this.otherOwnerAlive()) {
@@ -639,6 +706,35 @@ class SessionManager {
             return;
         }
         await this.finishClose();
+    }
+
+    async completeCloseRequest() {
+        if (!this.closeRequested) {
+            return;
+        }
+        this.closeRequested = false;
+        clearTimeout(this.closeTimer);
+        this.closeTimer = undefined;
+        clearTimeout(this.watchdogTimer);
+        clearTimeout(this.librarySyncTimer);
+        this.terminalGuard.stop();
+        this.stopHeartbeat();
+        await this.finishClose();
+    }
+
+    async cancelCloseRequest() {
+        if (!this.closeRequested) {
+            return;
+        }
+        this.closeRequested = false;
+        clearTimeout(this.closeTimer);
+        this.closeTimer = undefined;
+        const current = this.readSession();
+        if (current && current.state === 'closing') {
+            this.writeSession({ ...current, state: 'open' });
+        }
+        this.setBusy(undefined);
+        await this.refreshStatus();
     }
 
     async finishClose() {
@@ -863,17 +959,22 @@ class SessionManager {
         }
         this.disposed = true;
         clearInterval(this.statusTimer);
-        clearInterval(this.heartbeatTimer);
         clearTimeout(this.watchdogTimer);
         clearTimeout(this.librarySyncTimer);
+        clearTimeout(this.closeTimer);
+        if (this.sharedStateWatcher) {
+            this.sharedStateWatcher.close();
+            this.sharedStateWatcher = undefined;
+        }
+        if (this.workspaceChangeListener) {
+            this.workspaceChangeListener.dispose();
+            this.workspaceChangeListener = undefined;
+        }
         this.terminalGuard.dispose();
         if (this.syncer) {
             this.syncer.dispose();
         }
-        const owner = readJson(this.ownerFile);
-        if (owner && owner.pid === process.pid) {
-            removeFile(this.ownerFile);
-        }
+        this.stopHeartbeat();
         this.emitter.dispose();
     }
 }

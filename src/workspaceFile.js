@@ -13,12 +13,14 @@ function sshTerminalArgs(sshArgs, target, remoteWorkspace) {
 /**
  * 원격 작업 공간용 .code-workspace 내용을 만든다. (PC 로컬 확장 저장소에 저장되며 보드에는 쓰지 않는다)
  * @param {{localWorkspace?: string, drive?: string, target: {host: string, port: number, user: string}, remoteWorkspace: string,
- *          sshPath: string, sshArgs: string[], libraryCachePaths: string[],
+ *          sshPath: string, sshArgs: string[], libraryCachePaths: string[], platform?: string,
  *          terminal?: {path: string, args: string[]}}} options
- *        terminal을 지정하면 ssh.exe를 직접 실행하지 않고 지정한 실행 파일(SSH 터미널 배치 파일 등)로 실행한다.
+ *        terminal을 지정하면 ssh를 직접 실행하지 않고 지정한 실행 파일(SSH 터미널 스크립트 등)로 실행한다.
  */
 function buildWorkspace(options) {
     const { localWorkspace, drive, target, remoteWorkspace, sshPath, sshArgs, libraryCachePaths, terminal } = options;
+    const platform = options.platform || process.platform;
+    const profilePlatform = platform === 'win32' ? 'windows' : platform === 'darwin' ? 'osx' : 'linux';
     const destination = `${target.user}@${target.host}`;
     const profile = terminal
         ? { path: terminal.path, args: terminal.args }
@@ -50,14 +52,14 @@ function buildWorkspace(options) {
             'python.terminal.activateEnvironment': false,
             'terminal.integrated.enablePersistentSessions': false,
             'terminal.integrated.persistentSessionReviveProcess': 'never',
-            'terminal.integrated.profiles.windows': {
+            [`terminal.integrated.profiles.${profilePlatform}`]: {
                 [TERMINAL_PROFILE]: {
                     ...profile,
                     icon: 'remote',
                     overrideName: true
                 }
             },
-            'terminal.integrated.defaultProfile.windows': TERMINAL_PROFILE
+            [`terminal.integrated.defaultProfile.${profilePlatform}`]: TERMINAL_PROFILE
         },
         launch: {
             version: '0.2.0',

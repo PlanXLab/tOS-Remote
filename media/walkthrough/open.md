@@ -9,7 +9,7 @@ Selecting **Open Remote Workspace** does the following:
 After it opens:
 
 - **Terminal**: The terminal opens an SSH shell on the board. Local terminals restored from an earlier session are replaced with the board terminal.
-- **Sync**: Changes made in VS Code, Windows Explorer, or the board terminal are synchronized in both directions.
+- **Sync**: Changes made in VS Code, your file manager, or the board terminal are synchronized in both directions.
 - **F5**: Debugs the current Python file on tOS.
 - **Ctrl+F5** or the editor Run button (**Run on tOS**): Runs the file on tOS without the debugger.
 - **Path links**: Ctrl+click a `/home/tos/Workspace/...` path printed in the terminal to open that line in the local file.

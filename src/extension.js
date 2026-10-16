@@ -18,7 +18,7 @@ const { StatusBar } = require('./statusBar');
 const { PanelProvider } = require('./panel');
 const { WalkthroughState } = require('./walkthrough');
 const { getSettings, validateSettings, targetOf, migrateSettings, SECTION } = require('./settings');
-const { probeTcp } = require('./util');
+const { probeTcp, userCacheDirectory } = require('./util');
 const { t } = require('./i18n');
 
 const EXTENSION_ID = 'PlanXLab.tos-remote';
@@ -36,9 +36,9 @@ function activate(context) {
 
     const storageDir = context.globalStorageUri.fsPath;
     fs.mkdirSync(storageDir, { recursive: true });
-    const localDir = path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'tOS Remote');
+    const localDir = userCacheDirectory('tOS Remote');
 
-    // 비밀번호 인증용 SSH_ASKPASS 도우미 (Code.exe를 Node로 실행)
+    // 비밀번호 인증용 SSH_ASKPASS 도우미 (VS Code의 Node.js로 실행)
     const askpass = new AskpassBroker({
         storageDir,
         nodeExecutable: process.execPath,
@@ -128,9 +128,10 @@ function activate(context) {
         vscode.window.registerWebviewViewProvider('tosRemote.panel', panel),
         vscode.window.registerTerminalLinkProvider(new TerminalLinkProvider(sessionMgr)),
         vscode.debug.registerDebugConfigurationProvider('tos-remote', new DebugConfigurationProvider(runner, sessionMgr)),
+        vscode.tasks.registerTaskProvider('tos-remote', runner),
         vscode.debug.onDidTerminateDebugSession((session) => {
             if (session.configuration && session.configuration.tosRemote) {
-                runner.stopDebuggee(false);
+                runner.detachDebuggee();
             }
         })
     );
@@ -182,9 +183,6 @@ function activate(context) {
         context.subscriptions.push(vscode.commands.registerCommand(id, handler));
     }
 
-    if (process.platform !== 'win32') {
-        log.warn('tOS Remote currently supports Windows only.');
-    }
     syncWalkthrough(sessionMgr.readSession());
     prereq.refresh().catch((error) => log.warn(`Prerequisite check error: ${error.message}`));
     // 이전 형식(/home/<user>/Workspace)의 작업 공간 설정을 먼저 바꾼 뒤 세션을 초기화한다
@@ -283,7 +281,7 @@ async function setupSshKey({ auth, prereq, sessionMgr, panel, log, markConnected
         return;
     }
     if (!prereq.ssh.sshPath || !prereq.ssh.keygenPath) {
-        vscode.window.showErrorMessage(t('The OpenSSH client (ssh.exe, ssh-keygen.exe) is required.'));
+        vscode.window.showErrorMessage(t('The OpenSSH client (ssh, ssh-keygen) is required.'));
         return;
     }
     const target = targetOf(settings);

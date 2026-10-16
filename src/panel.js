@@ -246,7 +246,7 @@ class PanelProvider {
         </div>
         <label for="localWorkspace">${h(t('Local Folder'))}</label>
         <div style="display:flex;gap:4px;">
-            <input id="localWorkspace" data-setting="localWorkspace" type="text" spellcheck="false" placeholder="C:\\Workspace\\my-project">
+            <input id="localWorkspace" data-setting="localWorkspace" type="text" spellcheck="false" placeholder="${process.platform === 'win32' ? 'C:\\Workspace\\my-project' : '~/Workspace/my-project'}">
             <button class="secondary" id="btnSelectLocal" data-command="tosRemote.selectLocalWorkspace" style="white-space:nowrap;">${h(t('Browse'))}</button>
         </div>
     </div>
@@ -272,7 +272,7 @@ class PanelProvider {
     <summary>${h(t('Prerequisites'))} <span class="summary-badge" id="prereqBadge"></span></summary>
     <div class="check-list">
         <div class="check"><span class="mark" id="rcloneMark"></span><span id="rcloneText">rclone</span>
-            <button class="link" id="btnRclone" data-command="tosRemote.installRclone">${h(t('Download'))}</button></div>
+            <button class="link" id="btnRclone" data-command="tosRemote.installRclone">${h(t('Install'))}</button></div>
         <div class="check"><span class="mark" id="sshMark"></span><span>${h(t('OpenSSH Client'))}</span></div>
         <div class="check"><span class="mark" id="uvMark"></span><span id="uvText">uv</span>
             <button class="link" id="btnUv" data-command="tosRemote.installUv">${h(t('Download'))}</button></div>

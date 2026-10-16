@@ -9,7 +9,13 @@ const { obscure, reveal } = require('../src/obscure');
 const util = require('../src/util');
 const { sftpConnectionString, sftpEnv, compareVersions } = require('../src/rclone');
 const { buildWorkspace, sshTerminalArgs } = require('../src/workspaceFile');
-const { buildSshTerminalScript, buildRunScript, runScriptEnv, quoteWindowsArg, echoLine } = require('../src/sshTerminal');
+const {
+    buildSshTerminalScript, buildRunScript, runScriptEnv, quoteWindowsArg, echoLine,
+    terminalScriptPath, terminalShellLaunch
+} = require('../src/sshTerminal');
+const {
+    rclonePlatform, rcloneArch, rcloneExecutableName, getRclonePackageManager, uvWheelTags, selectUvWheel, uvExecutableName
+} = require('../src/installer');
 const fs = require('fs');
 const net = require('net');
 const os = require('os');
@@ -17,7 +23,7 @@ const { buildDebugScript } = require('../src/debugScript');
 const { localCachePath, parseDetectedPaths, isRequired, sessionLibraries } = require('../src/pyLibs');
 const board = require('../src/boardScripts');
 const { compileArgs, parsePylock, uvEnv } = require('../src/packageResolver');
-const { AskpassBroker, buildAskpassCmd } = require('../src/askpass');
+const { AskpassBroker, buildAskpassCmd, buildAskpassSh } = require('../src/askpass');
 const { Syncer, toRelativePosix, isExcluded, DEFAULT_EXCLUDES } = require('../src/syncer');
 
 const tests = [];
@@ -70,6 +76,7 @@ test('util: shellQuote / 경로 정규화', () => {
     assert.strictEqual(util.normalizeDriveLetter('Y:\\'), 'Y:');
     assert.strictEqual(util.normalizeDriveLetter('C:'), '');
     assert.strictEqual(util.normalizeDriveLetter('ZZ'), '');
+    assert.strictEqual(util.samePath('Workspace', 'workspace'), process.platform === 'win32');
 });
 
 test('util: 작업 공간 경로(홈 기준 상대 경로) 정규화', () => {
@@ -104,6 +111,195 @@ test('rclone: 접속 문자열과 환경 변수', () => {
     assert.ok(compareVersions('1.64.9', '1.65.0') < 0);
 });
 
+test('installer: OS별 rclone·uv 아키텍처와 패키지 관리자', () => {
+    assert.deepStrictEqual(['win32', 'linux', 'darwin'].map((platform) => rclonePlatform(platform)), ['windows', 'linux', 'osx']);
+    assert.deepStrictEqual(['x64', 'ia32', 'arm64', 'arm'].map((arch) => rcloneArch(arch)), ['amd64', '386', 'arm64', 'arm-v7']);
+    assert.strictEqual(rcloneExecutableName('win32'), 'rclone.exe');
+    assert.strictEqual(rcloneExecutableName('linux'), 'rclone');
+    assert.strictEqual(uvExecutableName('win32'), 'uv.exe');
+    assert.strictEqual(uvExecutableName('darwin'), 'uv');
+    assert.throws(() => rclonePlatform('freebsd'), /freebsd/);
+    assert.throws(() => rcloneArch('riscv64'), /riscv64/);
+
+    assert.deepStrictEqual(uvWheelTags('win32', 'arm64'), ['win_arm64']);
+    assert.deepStrictEqual(uvWheelTags('darwin', 'x64'), ['macosx_10_12_x86_64']);
+    const wheels = [
+        'uv-0.13.1-py3-none-manylinux_2_28_aarch64.whl',
+        'uv-0.13.1-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64.whl',
+        'uv-0.13.1-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl',
+        'uv-0.13.1-py3-none-musllinux_1_1_x86_64.whl'
+    ].map((filename) => ({ filename, packagetype: 'bdist_wheel', yanked: false }));
+    assert.strictEqual(selectUvWheel(wheels, uvWheelTags('linux', 'arm64', 'glibc')), wheels[1]);
+    assert.strictEqual(selectUvWheel(wheels, uvWheelTags('linux', 'arm64', 'musl')), wheels[1]);
+    assert.strictEqual(selectUvWheel(wheels, uvWheelTags('linux', 'x64', 'glibc')), wheels[2]);
+    assert.strictEqual(selectUvWheel(wheels, uvWheelTags('linux', 'x64', 'musl')), wheels[3]);
+    assert.strictEqual(selectUvWheel(wheels.slice(0, 1), uvWheelTags('linux', 'x64', 'musl')), undefined);
+    assert.strictEqual(selectUvWheel(wheels.map((wheel) => ({ ...wheel, yanked: true })), uvWheelTags('linux', 'x64', 'glibc')), undefined);
+
+    const locateWinget = (name) => name === 'winget.exe' ? 'C:\\Windows\\winget.exe' : undefined;
+    const winget = getRclonePackageManager('win32', locateWinget);
+    assert.strictEqual(winget.label, 'winget');
+    assert.deepStrictEqual(winget.args.slice(0, 4), ['install', '--exact', '--id', 'Rclone.Rclone']);
+    const locateBrew = (name) => name === 'brew' ? '/opt/homebrew/bin/brew' : undefined;
+    assert.strictEqual(getRclonePackageManager('darwin', locateBrew).label, 'Homebrew');
+    const locateDnf = (name) => name === 'dnf' ? '/usr/bin/dnf' : undefined;
+    assert.strictEqual(getRclonePackageManager('linux', locateDnf).label, 'DNF');
+    assert.strictEqual(getRclonePackageManager('linux', () => undefined), undefined);
+});
+
+test('prereq: 기존 도구 재사용·버전 검사·패키지 관리자 종료와 다운로드 대체', async () => {
+    const Module = require('module');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tos-prereq-test-'));
+    const binDir = path.join(dir, 'bin');
+    const externalDir = path.join(dir, 'package-manager');
+    fs.mkdirSync(binDir);
+    fs.mkdirSync(externalDir);
+    const localRclone = path.join(binDir, rcloneExecutableName());
+    const externalRclone = path.join(externalDir, rcloneExecutableName());
+    const localUv = path.join(binDir, uvExecutableName());
+    const externalUv = path.join(externalDir, uvExecutableName());
+    const versions = new Map();
+    for (const file of [localRclone, externalRclone, localUv, externalUv]) {
+        fs.writeFileSync(file, '');
+    }
+    versions.set(localRclone, '1.64.0');
+    versions.set(externalRclone, '1.75.1');
+    versions.set(localUv, '0.7.0');
+    versions.set(externalUv, '0.13.1');
+    const processListeners = new Set();
+    const taskListeners = new Set();
+    const listen = (listeners, callback) => {
+        listeners.add(callback);
+        return { dispose: () => listeners.delete(callback) };
+    };
+    const notices = [];
+    let choice;
+    let exitCode = 0;
+    let startError;
+    let onExecute = () => {};
+    let downloads = 0;
+    let uvDownloads = 0;
+    const settings = { rclonePath: '' };
+    const fakeVscode = {
+        EventEmitter: class { constructor() { this.event = () => ({ dispose() {} }); } fire() {} dispose() {} },
+        Task: class { constructor(definition, scope, name, source, execution) { Object.assign(this, { definition, scope, name, source, execution }); } },
+        ProcessExecution: class { constructor(command, args, options) { Object.assign(this, { command, args, options }); } },
+        ShellExecution: class { constructor(command, args, options) { Object.assign(this, { command, args, options }); } },
+        TaskScope: { Global: 1 },
+        TaskRevealKind: { Always: 1 },
+        TaskPanelKind: { Dedicated: 2 },
+        ProgressLocation: { Notification: 15 },
+        commands: { executeCommand: async () => {} },
+        window: {
+            showInformationMessage: async (message) => notices.push(message),
+            showErrorMessage: async (message) => { notices.push(message); },
+            showWarningMessage: async (message) => { notices.push(message); return choice; },
+            withProgress: async (_, fn) => fn({ report() {} })
+        },
+        tasks: {
+            onDidEndTaskProcess: (callback) => listen(processListeners, callback),
+            onDidEndTask: (callback) => listen(taskListeners, callback),
+            async executeTask(task) {
+                assert.strictEqual(task.execution.options.cwd, os.homedir(), 'installation must also work in an empty VS Code window');
+                if (task.execution instanceof fakeVscode.ShellExecution) {
+                    assert.ok(/cmd\.exe$/i.test(task.execution.options.executable));
+                    assert.deepStrictEqual(task.execution.options.shellArgs, ['/d', '/c']);
+                }
+                if (startError) {
+                    throw startError;
+                }
+                onExecute();
+                const execution = { task: { ...task } };
+                queueMicrotask(() => {
+                    for (const callback of processListeners) {
+                        callback({ execution: { task: { ...task } }, exitCode: 99 });
+                        callback({ execution, exitCode });
+                    }
+                    for (const callback of taskListeners) {
+                        callback({ execution });
+                    }
+                });
+                return execution;
+            }
+        }
+    };
+    const manager = { label: 'test-manager', command: 'test-manager', args: ['install', 'rclone'] };
+    const fakeInstaller = {
+        ...require('../src/installer'),
+        getUvVersion: async (exe) => versions.get(exe),
+        getRclonePackageManager: () => manager,
+        async installRclone() {
+            downloads++;
+            versions.set(localRclone, '1.75.1');
+            return { exePath: localRclone, version: '1.75.1' };
+        },
+        async installUv() {
+            uvDownloads++;
+            versions.set(localUv, '0.13.1');
+            return { exePath: localUv, version: '0.13.1' };
+        }
+    };
+    const modulePath = require.resolve('../src/prereq');
+    const load = Module._load;
+    delete require.cache[modulePath];
+    Module._load = function (request, ...rest) {
+        if (request === 'vscode') { return fakeVscode; }
+        if (request === './settings') { return { getSettings: () => settings }; }
+        if (request === './installer') { return fakeInstaller; }
+        if (request === './util') {
+            return { ...util, findExecutables: (name) => [path.join(externalDir, name)], findExecutable: () => undefined };
+        }
+        return load.call(this, request, ...rest);
+    };
+    let prereq;
+    try {
+        const { Prerequisites } = require('../src/prereq');
+        prereq = new Prerequisites({ globalState: { get() {}, async update() {} } },
+            { sshPath: 'ssh' }, util.noopLogger, binDir);
+        prereq.rclone = { getVersion: async (exe = prereq.rcloneExePath()) => versions.get(exe), isDaemonAlive: async () => false };
+        assert.strictEqual((await prereq.ensureAll()).rcloneVersion, '1.75.1');
+        assert.strictEqual(prereq.rcloneExePath(), externalRclone, 'a stale local copy must not mask a usable managed installation');
+        assert.strictEqual(await prereq.ensureUv(), externalUv);
+        assert.strictEqual((await prereq.installUv()).exePath, externalUv);
+        assert.strictEqual(uvDownloads, 0, 'installed uv must not be downloaded again');
+        assert.strictEqual((await prereq.installRclone()).exePath, externalRclone);
+        assert.strictEqual(downloads, 0);
+        settings.rclonePath = localRclone;
+        await assert.rejects(prereq.ensureAll(), /1.64.0/);
+        assert.strictEqual(await prereq.installRclone(), undefined, 'an explicit custom path must never be overwritten');
+        settings.rclonePath = '';
+
+        assert.strictEqual(await prereq.runPackageManager(manager), 0, 'match TaskExecution, not the cloned Task object');
+        assert.strictEqual(await prereq.runPackageManager({ ...manager, shell: true }), 0, 'Scoop must use cmd rather than the workspace SSH profile');
+        exitCode = undefined;
+        assert.strictEqual(await prereq.runPackageManager(manager), undefined);
+        exitCode = 0;
+        versions.set(externalRclone, '1.64.0');
+        onExecute = () => versions.set(externalRclone, '1.75.1');
+        assert.strictEqual((await prereq.installRclone()).exePath, externalRclone);
+        assert.strictEqual(downloads, 0, 'a successful package-manager install needs no fallback');
+
+        versions.set(externalRclone, '1.64.0');
+        onExecute = () => {};
+        exitCode = 1;
+        choice = undefined;
+        assert.strictEqual(await prereq.installRclone(), undefined);
+        assert.strictEqual(downloads, 0, 'fallback requires explicit consent');
+        startError = new Error('manager unavailable');
+        choice = 'Download verified release';
+        assert.strictEqual((await prereq.installRclone()).exePath, localRclone);
+        assert.strictEqual(downloads, 1);
+        assert.ok(notices.some((notice) => notice.includes('manager unavailable')));
+        assert.strictEqual(processListeners.size, 0);
+        assert.strictEqual(taskListeners.size, 0, 'task listeners must be disposed even when starting the task fails');
+    } finally {
+        Module._load = load;
+        delete require.cache[modulePath];
+        if (prereq) { prereq.dispose(); }
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test('workspaceFile: 설정·터미널·launch', () => {
     const ws = buildWorkspace({
         localWorkspace: 'C:\\Users\\tos\\tOS\\Workspace',
@@ -112,7 +308,8 @@ test('workspaceFile: 설정·터미널·launch', () => {
         remoteWorkspace: "/home/tos/My Work",
         sshPath: 'C:\\Windows\\System32\\OpenSSH\\ssh.exe',
         sshArgs: ['-p', '2222'],
-        libraryCachePaths: ['C:\\cache\\a']
+        libraryCachePaths: ['C:\\cache\\a'],
+        platform: 'win32'
     });
     assert.strictEqual(ws.folders[0].path, 'C:/Users/tos/tOS/Workspace');
     const wsDrive = buildWorkspace({
@@ -121,7 +318,8 @@ test('workspaceFile: 설정·터미널·launch', () => {
         remoteWorkspace: "/home/tos/My Work",
         sshPath: 'C:\\Windows\\System32\\OpenSSH\\ssh.exe',
         sshArgs: ['-p', '2222'],
-        libraryCachePaths: ['C:\\cache\\a']
+        libraryCachePaths: ['C:\\cache\\a'],
+        platform: 'win32'
     });
     assert.strictEqual(wsDrive.folders[0].path, 'Y:/');
     assert.deepStrictEqual(ws.settings['python.analysis.extraPaths'], ['C:/cache/a']);
@@ -132,6 +330,25 @@ test('workspaceFile: 설정·터미널·launch', () => {
     assert.strictEqual(ws.launch.configurations[0].name, 'tOS: Current File');
     assert.deepStrictEqual(ws.extensions.recommendations, ['ms-python.python', 'ms-python.debugpy']);
     JSON.parse(JSON.stringify(ws));
+
+    const linux = buildWorkspace({
+        localWorkspace: '/home/tos/workspace',
+        target: { host: 'board', port: 22, user: 'tos' },
+        remoteWorkspace: '/home/tos/Workspace',
+        sshPath: '/usr/bin/ssh',
+        sshArgs: ['-p', '22'],
+        terminal: { path: '/bin/sh', args: ['/tmp/ssh-terminal.sh'] },
+        libraryCachePaths: [],
+        platform: 'linux'
+    });
+    assert.deepStrictEqual(linux.settings['terminal.integrated.profiles.linux']['tOS SSH'].args, ['/tmp/ssh-terminal.sh']);
+    assert.strictEqual(linux.settings['terminal.integrated.defaultProfile.linux'], 'tOS SSH');
+    assert.ok(!linux.settings['terminal.integrated.profiles.windows']);
+    const mac = buildWorkspace({
+        localWorkspace: '/Users/tos/workspace', target: { host: 'board', port: 22, user: 'tos' },
+        remoteWorkspace: '/home/tos/Workspace', sshPath: '/usr/bin/ssh', sshArgs: [], libraryCachePaths: [], platform: 'darwin'
+    });
+    assert.strictEqual(mac.settings['terminal.integrated.defaultProfile.osx'], 'tOS SSH');
 });
 
 test('debugScript: 포트·경로 인용·루프백 바인딩', () => {
@@ -315,8 +532,10 @@ test('syncer + rclone: 실제 rclone rcd·SFTP 서버와 양방향 동기화', a
     const { Rclone } = require('../src/rclone');
     const { spawn } = require('child_process');
     const candidates = [
-        'D:\\VSCode\\data\\user-data\\User\\globalStorage\\planxlab.tos-remote\\bin\\rclone.exe',
-        path.join(process.env.APPDATA || '', 'Code', 'User', 'globalStorage', 'planxlab.tos-remote', 'bin', 'rclone.exe')
+        process.env.TOS_TEST_RCLONE,
+        util.findExecutable(rcloneExecutableName()),
+        path.join(process.env.VSCODE_PORTABLE || path.dirname(process.execPath), 'user-data', 'User', 'globalStorage', 'planxlab.tos-remote', 'bin', rcloneExecutableName()),
+        path.join(process.env.APPDATA || path.join(os.homedir(), '.config'), 'Code', 'User', 'globalStorage', 'planxlab.tos-remote', 'bin', rcloneExecutableName())
     ];
     const rcloneExe = candidates.find((p) => p && fs.existsSync(p));
     if (!rcloneExe) {
@@ -331,7 +550,7 @@ test('syncer + rclone: 실제 rclone rcd·SFTP 서버와 양방향 동기화', a
 
     const port = await util.getFreePort();
     const server = spawn(rcloneExe, ['serve', 'sftp', serveDir, '--addr', `127.0.0.1:${port}`, '--user', 'tos', '--pass', 'secret',
-        '--config', 'NUL', '--dir-cache-time', '100ms'], { windowsHide: true });
+        '--config', process.platform === 'win32' ? 'NUL' : os.devNull, '--dir-cache-time', '100ms'], { windowsHide: true });
     for (let i = 0; i < 50; i++) {
         await util.sleep(100);
         const p = await util.probeTcp('127.0.0.1', port, 500);
@@ -408,7 +627,8 @@ test('remoteTerminal: 로컬 셸 터미널 판별', () => {
     assert.strictEqual(isLocalShellTerminal({ name: 'powershell', creationOptions: {} }, script, prefixes), true);
     assert.strictEqual(isLocalShellTerminal({ name: 'pwsh', creationOptions: { shellPath: 'pwsh.exe' } }, script, prefixes), true);
     assert.strictEqual(isLocalShellTerminal({ name: 'tOS SSH', creationOptions: {} }, script, prefixes), false);
-    assert.strictEqual(isLocalShellTerminal({ name: 'cmd', creationOptions: { shellArgs: ['/d', '/c', script.toUpperCase()] } }, script, prefixes), false);
+    assert.strictEqual(isLocalShellTerminal({ name: 'cmd', creationOptions: { shellArgs: ['/d', '/c', script] } }, script, prefixes), false);
+    assert.strictEqual(isLocalShellTerminal({ name: 'cmd', creationOptions: { shellArgs: ['/d', '/c', script.toUpperCase()] } }, script, prefixes), process.platform !== 'win32');
     assert.strictEqual(isLocalShellTerminal({ name: 'Run on tOS: a.py', creationOptions: {} }, script, prefixes), false);
     assert.strictEqual(isLocalShellTerminal({ name: 'x', creationOptions: { pty: {} } }, script, prefixes), false);
     assert.strictEqual(isLocalShellTerminal({ name: 'x', creationOptions: { hideFromUser: true } }, script, prefixes), false);
@@ -640,7 +860,7 @@ test('pyLibs: 감지 결과의 종류·심볼릭 링크 중복 제거·별칭', 
     assert.deepStrictEqual(sessionLibraries({ libraryPaths: [real, '/home/tos/.local/lib/python3.12/site-packages'] }).map((l) => l.kind), ['system', 'user']);
 });
 
-test('sshTerminal: cmd 배치 파일 (인용·% 이스케이프·재시도)', () => {
+test('sshTerminal: Windows cmd 배치 파일 (인용·% 이스케이프·재시도)', () => {
     const ws = buildWorkspace({
         drive: 'Z:',
         target: { host: 'h', port: 22, user: 'tos' },
@@ -648,7 +868,8 @@ test('sshTerminal: cmd 배치 파일 (인용·% 이스케이프·재시도)', ()
         sshPath: 'C:\\ssh.exe',
         sshArgs: ['-p', '22'],
         terminal: { path: 'C:\\Windows\\System32\\cmd.exe', args: ['/d', '/c', 'C:\\s\\ssh-terminal.cmd'] },
-        libraryCachePaths: []
+        libraryCachePaths: [],
+        platform: 'win32'
     });
     const profile = ws.settings['terminal.integrated.profiles.windows']['tOS SSH'];
     assert.deepStrictEqual([profile.path, profile.args], ['C:\\Windows\\System32\\cmd.exe', ['/d', '/c', 'C:\\s\\ssh-terminal.cmd']]);
@@ -660,16 +881,16 @@ test('sshTerminal: cmd 배치 파일 (인용·% 이스케이프·재시도)', ()
 
     const args = sshTerminalArgs(['-p', '22', '-o', 'UserKnownHostsFile="C:/Users/a b/known_hosts"', '-i', 'C:\\Users\\a b\\.ssh\\id'],
         { host: 'h', user: 'tos' }, '/home/tos/50%');
-    const script = buildSshTerminalScript('C:\\Windows\\System32\\OpenSSH\\ssh.exe', args);
+    const script = buildSshTerminalScript('C:\\Windows\\System32\\OpenSSH\\ssh.exe', args, 'win32');
     const line = script.split('\r\n').find((l) => l.includes('ssh.exe'));
     assert.strictEqual(line, 'C:\\Windows\\System32\\OpenSSH\\ssh.exe -p 22 -o "UserKnownHostsFile=\\"C:/Users/a b/known_hosts\\"" '
         + '-i "C:\\Users\\a b\\.ssh\\id" -t tos@h "cd \'/home/tos/50%%\'; exec $SHELL -l"');
     assert.ok(script.includes('if not errorlevel 255 exit /b 0'));
-    assert.throws(() => buildSshTerminalScript('ssh.exe', ['a&b']));
+    assert.throws(() => buildSshTerminalScript('ssh.exe', ['a&b'], 'win32'));
 });
 
-test('sshTerminal: tOS에서 실행 배치 파일 (명령줄 숨김·종료 메시지·키 입력 대기)', () => {
-    const script = buildRunScript();
+test('sshTerminal: Windows tOS 실행 배치 파일 (명령줄 숨김·종료 메시지·키 입력 대기)', () => {
+    const script = buildRunScript(undefined, undefined, 'win32');
     const lines = script.split('\r\n');
     assert.ok(lines.includes('setlocal EnableDelayedExpansion'));
     assert.ok(lines.includes('!TOS_SSH_EXE! !TOS_SSH_ARGS!'), 'ssh must come from environment variables');
@@ -684,10 +905,319 @@ test('sshTerminal: tOS에서 실행 배치 파일 (명령줄 숨김·종료 메�
     assert.strictEqual(env.TOS_SSH_ARGS, `-p 22 -t tos@h "cd '/home/tos/My Work' && python3 -u 'a & b.py'"`);
 });
 
+test('sshTerminal: POSIX 스크립트·OS별 셸 실행', () => {
+    const args = ['-p', '22', '-o', 'UserKnownHostsFile="/Users/a b/known_hosts"', '-i', '/Users/a b/.ssh/id'];
+    const terminal = buildSshTerminalScript('/usr/bin/ssh', args, 'darwin');
+    assert.ok(terminal.startsWith('#!/bin/sh\n'));
+    assert.ok(terminal.includes("'/usr/bin/ssh' '-p' '22'"));
+    assert.ok(terminal.includes("'/Users/a b/.ssh/id'"));
+    assert.ok(terminal.includes('"$attempt"'));
+    assert.ok(terminal.includes('sleep 2'));
+    const run = buildRunScript('/usr/bin/ssh', [...args, '-t', 'tos@board', "python3 -u 'file with spaces.py'"], 'linux');
+    assert.ok(run.startsWith('#!/bin/sh\n'));
+    assert.ok(run.includes("'/usr/bin/ssh' '-p' '22'"));
+    assert.ok(run.includes("'/Users/a b/.ssh/id'"));
+    assert.ok(run.includes('stty -icanon -echo min 1 time 0'));
+    assert.ok(run.includes('dd bs=1 count=1'));
+    assert.ok(!run.includes('TOS_SSH_ARGS'));
+    assert.deepStrictEqual(terminalShellLaunch('/tmp/ssh-terminal.sh', 'darwin'), {
+        shellPath: '/bin/sh',
+        shellArgs: ['/tmp/ssh-terminal.sh']
+    });
+    assert.strictEqual(path.basename(terminalScriptPath('/tmp', 'ssh-terminal', 'linux')), 'ssh-terminal.sh');
+
+    if (process.platform !== 'win32') {
+        const { spawnSync } = require('child_process');
+        const syntax = spawnSync('/bin/sh', ['-n'], { input: `${terminal}\n${run}`, encoding: 'utf8' });
+        assert.strictEqual(syntax.status, 0, syntax.stderr);
+    }
+});
+
+test('sshTerminal: POSIX 실제 실행 인자·종료 처리·연결 재시도', async () => {
+    if (process.platform === 'win32') {
+        return;
+    }
+    const argument = 'space \' " $() & 한글';
+    const args = ['-c', 'printf "%s\\n" "$@"', 'ssh-test', argument];
+    const run = await util.runProcess('/bin/sh', [], {
+        input: buildRunScript('/bin/sh', args, 'linux'), timeoutMs: 10000
+    });
+    assert.strictEqual(run.code, 0, run.stderr);
+    assert.ok(run.stdout.startsWith(`${argument}\n`), 'shell-sensitive arguments must be preserved without evaluation');
+    assert.ok(run.stdout.includes('Terminated, press any key'));
+    const terminal = await util.runProcess('/bin/sh', [], {
+        input: buildSshTerminalScript('/bin/sh', args, 'darwin'), timeoutMs: 10000
+    });
+    assert.strictEqual(terminal.code, 0, terminal.stderr);
+    assert.strictEqual(terminal.stdout, `${argument}\n`);
+    const retry = await util.runProcess('/bin/sh', [], {
+        input: buildSshTerminalScript('/bin/sh', ['-c', 'printf "attempt\\n"; exit 255'], 'linux'), timeoutMs: 10000
+    });
+    assert.strictEqual(retry.code, 0, retry.stderr);
+    assert.strictEqual(retry.stdout.split('\n').filter((line) => line === 'attempt').length, 3);
+    assert.ok(retry.stdout.includes('(1/3)'));
+    assert.ok(retry.stdout.includes('(2/3)'));
+    assert.ok(retry.stdout.includes('Check the board power and network.'));
+});
+
 test('debugScript: debugpy가 없으면 설치 안내용 표시', () => {
     const script = buildDebugScript({ remoteWorkspace: '/home/tos/Workspace', pythonCommand: 'python3', relativePath: 'a.py', port: 5678 });
     assert.ok(script.includes(`python3 -c 'import debugpy' 2>/dev/null || { echo TOS_DEBUGPY_MISSING; exit 1; }`));
     assert.ok(script.indexOf('TOS_DEBUGPY_MISSING') < script.indexOf('-m debugpy'));
+});
+
+test('runner: 연결 끊김은 프로세스를 유지하고 종료된 프로세스는 같은 포트로 재시작', async () => {
+    const Module = require('module');
+    const { EventEmitter: NodeEventEmitter } = require('events');
+    class FakeEventEmitter {
+        constructor() {
+            this.emitter = new NodeEventEmitter();
+            this.event = (listener) => {
+                this.emitter.on('event', listener);
+                return { dispose: () => this.emitter.off('event', listener) };
+            };
+        }
+        fire(value) { this.emitter.emit('event', value); }
+        dispose() { this.emitter.removeAllListeners(); }
+    }
+    class FakeTask {
+        constructor(definition, scope, name, source, execution, problemMatchers) {
+            Object.assign(this, { definition, scope, name, source, execution, problemMatchers });
+        }
+    }
+    class FakeCustomExecution {
+        constructor(callback) { this.callback = callback; }
+    }
+    const fakeVscode = {
+        EventEmitter: FakeEventEmitter,
+        Task: FakeTask,
+        CustomExecution: FakeCustomExecution,
+        TaskScope: { Workspace: 'workspace' },
+        TaskRevealKind: { Never: 'never' },
+        ProgressLocation: { Notification: 'notification' },
+        Uri: { file: (fsPath) => ({ scheme: 'file', fsPath }) },
+        workspace: { workspaceFolders: [] },
+        window: {
+            withProgress: async (_options, task) => task(),
+            showErrorMessage: async () => undefined
+        },
+        extensions: { getExtension: () => ({}) }
+    };
+    const modulePath = require.resolve('../src/runner');
+    const load = Module._load;
+    delete require.cache[modulePath];
+    Module._load = function (request, ...args) {
+        return request === 'vscode' ? fakeVscode : load.call(this, request, ...args);
+    };
+    try {
+        const { Runner, DebugConfigurationProvider } = require('../src/runner');
+        const spawned = [];
+        const ssh = {
+            async spawn(_target, _remoteArgs, options) {
+                const events = new NodeEventEmitter();
+                const child = {
+                    stdin: new NodeEventEmitter(),
+                    stdout: new NodeEventEmitter(),
+                    stderr: new NodeEventEmitter(),
+                    exitCode: null,
+                    signalCode: null,
+                    on: events.on.bind(events),
+                    emit: events.emit.bind(events),
+                    kill() { this.killed = true; return true; }
+                };
+                child.stdin.end = () => setImmediate(() => child.stdout.emit('data', Buffer.from('TOS_DEBUG_READY')));
+                spawned.push({ child, options });
+                return child;
+            },
+            async exec() { return { code: 0, stdout: '', stderr: '' }; }
+        };
+        const session = {
+            host: 'board',
+            port: 22,
+            user: 'tos',
+            remoteWorkspace: '/home/tos/Workspace',
+            pythonCommand: 'python3',
+            debugPort: 5678
+        };
+        const sessionMgr = {
+            readSession: () => session,
+            async sshAuth() { return { keyPath: 'test-key' }; },
+            getPathMappings: () => [{ local: 'C:\\workspace', remote: session.remoteWorkspace }]
+        };
+        const log = { debug() {}, info() {}, warn() {}, error() {} };
+        const runner = new Runner(sessionMgr, ssh, log);
+        runner.prepare = async () => ({ session, relativePath: 'main.py' });
+        const provider = new DebugConfigurationProvider(runner, sessionMgr);
+        const folder = { uri: { fsPath: 'C:\\workspace' } };
+        const config = await provider.resolveDebugConfiguration(folder, {
+            type: 'tos-remote',
+            request: 'launch',
+            name: 'Remote debug',
+            program: 'C:\\workspace\\main.py',
+            justMyCode: false
+        });
+
+        assert.strictEqual(config.type, 'debugpy');
+        assert.strictEqual(config.preLaunchTask, 'Preparing debug on tOS');
+        const localPort = config.connect.port;
+
+        const runDebugTask = async () => {
+            const [task] = runner.provideTasks();
+            assert.strictEqual(task.name, config.preLaunchTask);
+            const terminal = await task.execution.callback();
+            const result = new Promise((resolve) => terminal.onDidClose(resolve));
+            terminal.open();
+            return result;
+        };
+        assert.strictEqual(await runDebugTask(), 0);
+        assert.strictEqual(spawned.length, 1, 'the initial task must not launch a duplicate process');
+        runner.detachDebuggee();
+        assert.strictEqual(spawned[0].child.killed, undefined, 'disconnect must preserve the remote process');
+
+        spawned[0].child.exitCode = 0;
+        spawned[0].child.emit('close', 0);
+        assert.strictEqual(await runDebugTask(), 0);
+        assert.strictEqual(spawned.length, 2, 'restart must launch a new remote process after exit');
+        assert.strictEqual(spawned[1].options.sshArgs[1], `127.0.0.1:${localPort}:127.0.0.1:5678`);
+        runner.stopDebuggee(false);
+    } finally {
+        Module._load = load;
+        delete require.cache[modulePath];
+    }
+});
+
+test('session: 다른 창의 닫기를 공유 세션 파일로 전달', async () => {
+    const Module = require('module');
+    const { EventEmitter: NodeEventEmitter } = require('events');
+    class FakeEventEmitter {
+        constructor() {
+            this.emitter = new NodeEventEmitter();
+            this.event = (listener) => {
+                this.emitter.on('event', listener);
+                return { dispose: () => this.emitter.off('event', listener) };
+            };
+        }
+        fire(value) { this.emitter.emit('event', value); }
+        dispose() { this.emitter.removeAllListeners(); }
+    }
+    class FakeSyncer {
+        constructor() { this.pendingCount = 0; }
+        onDidChange() { return { dispose() {} }; }
+        async flush() { return true; }
+        stopWatch() {}
+        dispose() {}
+    }
+    class FakeTerminalGuard {
+        stop() {}
+        dispose() {}
+    }
+    const workspaceEvents = new FakeEventEmitter();
+    const fakeVscode = {
+        EventEmitter: FakeEventEmitter,
+        ProgressLocation: { Notification: 'notification' },
+        workspace: {
+            workspaceFile: undefined,
+            onDidChangeWorkspaceFolders: (listener) => workspaceEvents.event(listener)
+        },
+        commands: {
+            async executeCommand(command) {
+                if (command === 'workbench.action.closeFolder') {
+                    fakeVscode.workspace.workspaceFile = undefined;
+                    workspaceEvents.fire({ added: [], removed: [] });
+                }
+            }
+        },
+        window: {
+            async withProgress(_options, task) { return task({ report() {} }); },
+            setStatusBarMessage() {}
+        }
+    };
+    const modulePath = require.resolve('../src/session');
+    const load = Module._load;
+    const stubs = new Map([
+        ['./auth', { isAuthError: () => false }],
+        ['./settings', { getSettings() {}, validateSettings() {}, targetOf() {} }],
+        ['./rclone', { sftpConnectionString() {} }],
+        ['./workspaceFile', { buildWorkspace() {}, sshTerminalArgs() {} }],
+        ['./sshTerminal', { buildSshTerminalScript() {}, terminalScriptPath() {}, terminalShellLaunch() {} }],
+        ['./pyLibs', {}],
+        ['./obscure', { obscure: (value) => value }],
+        ['./syncer', { Syncer: FakeSyncer }],
+        ['./remoteTerminal', { RemoteTerminalGuard: FakeTerminalGuard }]
+    ]);
+    delete require.cache[modulePath];
+    Module._load = function (request, ...args) {
+        if (request === 'vscode') {
+            return fakeVscode;
+        }
+        return stubs.has(request) ? stubs.get(request) : load.call(this, request, ...args);
+    };
+    const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tos-remote-session-'));
+    let first;
+    let second;
+    try {
+        const { SessionManager } = require('../src/session');
+        const log = { debug() {}, info() {}, warn() {}, error() {} };
+        const services = {
+            context: {},
+            log,
+            ssh: {},
+            rclone: {
+                readState: () => undefined,
+                async isDaemonAlive() { return false; },
+                async isMounted() { return false; },
+                async quitDaemon() {}
+            },
+            auth: {},
+            prereq: {},
+            storageDir
+        };
+        fakeVscode.workspace.workspaceFile = { scheme: 'file', fsPath: path.join(storageDir, 'local.code-workspace') };
+        first = new SessionManager(services);
+        first.watchSharedState();
+        const remoteWorkspaceFile = path.join(storageDir, 'tOS.code-workspace');
+        fakeVscode.workspace.workspaceFile = { scheme: 'file', fsPath: remoteWorkspaceFile };
+        second = new SessionManager(services);
+        const opened = new Promise((resolve) => {
+            first.onDidChange((status) => {
+                if (status.session) {
+                    resolve(status);
+                }
+            });
+        });
+        const withTimeout = (promise, message) => new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error(message)), 2000);
+            promise.then(
+                (value) => { clearTimeout(timer); resolve(value); },
+                (error) => { clearTimeout(timer); reject(error); }
+            );
+        });
+        second.writeSession({ state: 'open', identity: 'board-session', host: 'board', port: 22, user: 'tos' });
+        await withTimeout(opened, 'The first window was not notified when the session opened');
+        assert.strictEqual(second.readSession().state, 'open');
+
+        const closed = new Promise((resolve) => {
+            first.onDidChange((status) => {
+                if (!status.session) {
+                    resolve(status);
+                }
+            });
+        });
+        await second.close();
+        const closeNotification = await withTimeout(closed, 'The first window did not receive the close');
+        assert.strictEqual(closeNotification.session, undefined);
+        assert.strictEqual(first.readSession(), undefined);
+    } finally {
+        if (first) {
+            first.dispose();
+        }
+        if (second) {
+            second.dispose();
+        }
+        Module._load = load;
+        delete require.cache[modulePath];
+        fs.rmSync(storageDir, { recursive: true, force: true });
+    }
 });
 
 // tOS-Lite 1.0 보드에서 확인한 값
@@ -850,33 +1380,74 @@ test('packageResolver: uv 인자·환경과 pylock.toml 읽기', () => {
     assert.strictEqual(packages[1].wheels[1].size, 301667);
 });
 
-test('askpass: 도우미 배치 파일과 일회용 토큰 파이프', async () => {
-    const cmd = buildAskpassCmd();
-    assert.strictEqual(cmd, '@echo off\r\nsetlocal DisableDelayedExpansion\r\nset ELECTRON_RUN_AS_NODE=1\r\n"%TOS_ASKPASS_NODE%" "%TOS_ASKPASS_HELPER%"\r\n');
-    assert.ok(/^[\x20-\x7e\r\n]*$/.test(cmd), 'the batch file must be ASCII (cmd reads it in the OEM code page)');
-    if (process.platform !== 'win32') {
-        return;
+test('askpass: OS별 도우미와 일회용 로컬 채널', async () => {
+    const windows = process.platform === 'win32';
+    const script = windows ? buildAskpassCmd() : buildAskpassSh();
+    if (windows) {
+        assert.strictEqual(script, '@echo off\r\nsetlocal DisableDelayedExpansion\r\nset ELECTRON_RUN_AS_NODE=1\r\n"%TOS_ASKPASS_NODE%" "%TOS_ASKPASS_HELPER%"\r\n');
+        assert.ok(/^[\x20-\x7e\r\n]*$/.test(script), 'the batch file must be ASCII (cmd reads it in the OEM code page)');
+    } else {
+        assert.strictEqual(script, '#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "$TOS_ASKPASS_NODE" "$TOS_ASKPASS_HELPER"\n');
     }
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tos-askpass-test-'));
-    const broker = new AskpassBroker({ storageDir: dir, nodeExecutable: 'C:\\사용자\\Code.exe', helperScript: 'C:\\사용자\\helper.js' });
+    const broker = new AskpassBroker({
+        storageDir: dir,
+        nodeExecutable: windows ? 'C:\\사용자\\Code.exe' : '/Users/사용자/Code',
+        helperScript: windows ? 'C:\\사용자\\helper.js' : '/Users/사용자/helper.js'
+    });
     const session = await broker.open('s3cret 비밀');
     const ask = (token) => new Promise((resolve) => {
         const chunks = [];
-        const socket = net.connect(session.env.TOS_ASKPASS_PIPE, () => socket.write(`${token}\n`));
+        const address = windows
+            ? session.env.TOS_ASKPASS_PIPE
+            : { host: session.env.TOS_ASKPASS_HOST, port: Number(session.env.TOS_ASKPASS_PORT) };
+        const socket = net.connect(address, () => socket.write(`${token}\n`));
         socket.on('data', (chunk) => chunks.push(chunk));
         socket.on('close', () => resolve(Buffer.concat(chunks).toString('utf8')));
         socket.on('error', () => resolve(''));
     });
     try {
         assert.strictEqual(session.env.SSH_ASKPASS_REQUIRE, 'force');
-        assert.ok(session.env.DISPLAY, 'OpenSSH 8.1 (Windows 10) uses SSH_ASKPASS only when DISPLAY is set');
-        assert.deepStrictEqual([session.env.TOS_ASKPASS_NODE, session.env.TOS_ASKPASS_HELPER], ['C:\\사용자\\Code.exe', 'C:\\사용자\\helper.js']);
+        assert.ok(session.env.DISPLAY);
+        assert.deepStrictEqual(
+            [session.env.TOS_ASKPASS_NODE, session.env.TOS_ASKPASS_HELPER],
+            windows ? ['C:\\사용자\\Code.exe', 'C:\\사용자\\helper.js'] : ['/Users/사용자/Code', '/Users/사용자/helper.js']
+        );
         assert.ok(fs.readFileSync(session.env.SSH_ASKPASS, 'utf8').includes('ELECTRON_RUN_AS_NODE'));
+        if (!windows) {
+            assert.strictEqual(fs.statSync(session.env.SSH_ASKPASS).mode & 0o777, 0o700);
+        }
         assert.ok(!JSON.stringify(session.env).includes('s3cret'), 'password must not be in the environment');
         assert.strictEqual(await ask('wrong-token'), '');
         assert.strictEqual(await ask(session.env.TOS_ASKPASS_TOKEN), 's3cret 비밀');
         assert.strictEqual(await ask(session.env.TOS_ASKPASS_TOKEN), 's3cret 비밀');
         assert.strictEqual(await ask(session.env.TOS_ASKPASS_TOKEN), '', 'answers are limited');
+    } finally {
+        session.dispose();
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('askpass: 실제 도우미 프로세스로 비밀번호 전달', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tos askpass process '));
+    const helperScript = path.join(__dirname, '..', 'src', 'askpassHelper.js');
+    const broker = new AskpassBroker({ storageDir: dir, nodeExecutable: process.execPath, helperScript });
+    const session = await broker.open('s3cret 한글');
+    try {
+        const file = process.platform === 'win32' ? process.execPath : broker.scriptPath;
+        const args = process.platform === 'win32' ? [helperScript] : [];
+        const result = await util.runProcess(file, args, {
+            env: { ...process.env, ...session.env, ELECTRON_RUN_AS_NODE: '1' },
+            timeoutMs: 20000
+        });
+        assert.strictEqual(result.code, 0, result.stderr);
+        assert.strictEqual(result.stdout, 's3cret 한글\n');
+        const rejected = await util.runProcess(file, args, {
+            env: { ...process.env, ...session.env, ELECTRON_RUN_AS_NODE: '1', TOS_ASKPASS_TOKEN: 'incorrect-token' },
+            timeoutMs: 20000
+        });
+        assert.strictEqual(rejected.code, 1);
+        assert.strictEqual(rejected.stdout, '');
     } finally {
         session.dispose();
         fs.rmSync(dir, { recursive: true, force: true });
@@ -940,7 +1511,7 @@ test('l10n: VS Code 밖에서는 영어 원문에 인자를 채움', () => {
 
 test('sshTerminal: echo 이스케이프', () => {
     assert.strictEqual(echoLine('a & b | c < d > e ^ f 100%'), 'echo a ^& b ^| c ^< d ^> e ^^ f 100%%');
-    const script = buildSshTerminalScript('C:\\ssh.exe', ['-p', '22']);
+    const script = buildSshTerminalScript('C:\\ssh.exe', ['-p', '22'], 'win32');
     assert.ok(script.includes('(%TOS_ATTEMPT%/3)'), 'attempt variable not substituted');
     assert.ok(!script.includes('\u0000'));
 });

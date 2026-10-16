@@ -2,9 +2,20 @@
 
 **English** | [한국어](CHANGELOG.ko.md)
 
+## 0.6.1
+
+- **Remote debugging lifecycle**: Disconnecting leaves the remote process running, and Restart prepares a new debuggee if the previous process has exited.
+- **Cross-window workspace status**: Closing the remote workspace updates its state in other VS Code windows.
+
+## 0.6.0
+
+- **Cross-platform support**: tOS Remote now runs on Windows, Linux, and macOS (x64/arm64), using each platform's OpenSSH client, password helper, and terminal scripts.
+- **Use the host's package tools**: an installed supported rclone is reused; otherwise the extension tries winget/Scoop/Chocolatey, Homebrew/MacPorts, or common Linux package managers, then offers the SHA-256-verified official binary if needed. Existing uv installations on `PATH` or in `~/.local/bin` are also reused; the downloaded uv fallback now matches the host OS and architecture.
+- **Platform-specific cache locations**: rclone and Python package caches now use the standard user cache directory on each OS.
+- **Cross-platform regression tests**: CI checks real rclone/uv downloads, executable permissions, and SFTP synchronization on Windows, Linux, and macOS before packaging.
+
 ## 0.5.2
 
-- **Marketplace packaging without local build tools**: `scripts/build-vsix.ps1` creates an uploadable `.vsix` directly; no Node.js or `vsce` installation is needed.
 - **Jupyter extension is optional**: It is no longer recommended automatically; install it only when you want to use Jupyter cells.
 - **Safe window switching**: If the remote workspace is already open in another window, the extension opens the window switcher instead of replacing the current folder.
 - **Jupyter kernel selected automatically**: In the remote workspace window, opening a notebook or a Python file with `#%%` cells starts Jupyter on the board (when it is installed) and selects the board's kernel, so you no longer need **Select Another Kernel > tOS Remote > Python 3 (ipykernel)** every time. The first time on each board, the board's kernel list appears once; your choice is remembered. Interactive windows reuse the board kernel because the server is already running when they open. New setting `tosRemote.jupyterAutoSelectKernel` (default `true`).
