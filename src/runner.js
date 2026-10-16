@@ -2,7 +2,7 @@
 
 const path = require('path');
 const vscode = require('vscode');
-const { shellQuote, lastLine, writeIfChanged } = require('./util');
+const { shellQuote, lastLine, writeIfChanged, getFreePort } = require('./util');
 const { buildDebugScript, DEBUG_READY, DEBUG_FAILED, DEBUGPY_MISSING } = require('./debugScript');
 const { buildRunScript, runScriptEnv } = require('./sshTerminal');
 const { t } = require('./i18n');
@@ -31,10 +31,10 @@ class Runner {
         if (!uri || uri.scheme !== 'file') {
             throw new Error(t('Open a Python file in the editor first.'));
         }
-        const root = `${session.drive}\\`;
+        const root = session.localWorkspace ? path.normalize(session.localWorkspace) : `${session.drive}\\`;
         const relative = path.relative(root, uri.fsPath);
         if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
-            throw new Error(t('Files outside the remote workspace ({0}) cannot be run: {1}', session.drive, uri.fsPath));
+            throw new Error(t('Files outside the remote workspace ({0}) cannot be run: {1}', root, uri.fsPath));
         }
         return { session, relativePath: relative.split(path.sep).join('/') };
     }
@@ -45,8 +45,13 @@ class Runner {
         if (document && document.isDirty) {
             await document.save();
         }
-        // VFS 쓰기 지연 때문에 저장 직후 보드에 이전 파일이 남아 있을 수 있어 업로드 완료를 기다린다
-        const flushed = await this.sessionMgr.waitForUploads(15000);
+        // Watcher notification can lag behind save; enqueue this file without rescanning the entire workspace.
+        if (this.sessionMgr.syncer) {
+            this.sessionMgr.syncer.enqueueChange('copy', uri.fsPath);
+        }
+        const flushed = this.sessionMgr.syncer
+            ? (await this.sessionMgr.syncer.flush(15000, { scan: false }))
+            : (await this.sessionMgr.waitForUploads(15000));
         if (!flushed) {
             throw new Error(t('Uploading files to the board has not finished. Try again in a moment.'));
         }
@@ -116,19 +121,22 @@ class Runner {
 
     /**
      * @param {{keyPath?: string, password?: string}} sshAuth
-     * @returns {Promise<number>} debugpy 포트. debugpy가 없으면 error.code === 'DEBUGPY_MISSING'
+     * @returns {Promise<number>} PC 로컬 포워딩 포트. debugpy가 없으면 error.code === 'DEBUGPY_MISSING'
      */
     async startDebuggee(session, relativePath, token, sshAuth) {
         this.stopDebuggee(false);
-        const port = session.debugPort || 5678;
+        const remotePort = session.debugPort || 5678;
+        const localPort = await getFreePort();
         const script = buildDebugScript({
             remoteWorkspace: session.remoteWorkspace,
             pythonCommand: session.pythonCommand || 'python3',
             relativePath,
-            port
+            port: remotePort
         });
         const target = { host: session.host, port: session.port, user: session.user };
-        const child = await this.ssh.spawn(target, ['sh -s'], sshAuth);
+        // SSH 로컬 포트 포워딩 (-L 127.0.0.1:localPort:127.0.0.1:remotePort)
+        const sshArgs = ['-L', `127.0.0.1:${localPort}:127.0.0.1:${remotePort}`];
+        const child = await this.ssh.spawn(target, ['sh -s'], { ...sshAuth, sshArgs });
         this.debugChild = child;
         child.stdin.on('error', () => {});
         child.stdin.end(script);
@@ -147,7 +155,7 @@ class Runner {
                     this.stopDebuggee(true);
                     reject(error);
                 } else {
-                    resolve(port);
+                    resolve(localPort);
                 }
             };
             const timer = setTimeout(() => finish(new Error(t('Timed out starting the remote debugger (debugpy).'))), 30000);
@@ -250,13 +258,13 @@ class DebugConfigurationProvider {
             // 키 인증이 아니면 저장된 비밀번호를 SSH_ASKPASS로 넘긴다 (없으면 한 번 입력)
             const sshAuth = await this.sessionMgr.sshAuth(session, { interactive: true });
             const start = () => vscode.window.withProgress({
-                location: vscode.ProgressLocation.Window,
-                title: t('Starting the remote debugger')
+                location: vscode.ProgressLocation.Notification,
+                title: t('Preparing debug on tOS')
             }, () => this.runner.startDebuggee(session, relativePath, token, sshAuth));
 
-            let port;
+            let localPort;
             try {
-                port = await start();
+                localPort = await start();
             } catch (error) {
                 if (error.code !== 'DEBUGPY_MISSING' || !this.runner.boardTools) {
                     throw error;
@@ -271,14 +279,14 @@ class DebugConfigurationProvider {
                 if (pick !== install || !(await this.runner.boardTools.install('debug')) || (token && token.isCancellationRequested)) {
                     return undefined;
                 }
-                port = await start();
+                localPort = await start();
             }
 
             return {
                 type: 'debugpy',
                 request: 'attach',
                 name: config.name || `tOS: ${relativePath}`,
-                connect: { host: session.host, port },
+                connect: { host: '127.0.0.1', port: localPort },
                 pathMappings: this.sessionMgr.getPathMappings().map((m) => ({ localRoot: m.local, remoteRoot: m.remote })),
                 redirectOutput: true,
                 justMyCode: config.justMyCode !== false,

@@ -16,6 +16,7 @@ const { JupyterManager } = require('./jupyter');
 const { TerminalLinkProvider } = require('./terminalLinks');
 const { StatusBar } = require('./statusBar');
 const { PanelProvider } = require('./panel');
+const { WalkthroughState } = require('./walkthrough');
 const { getSettings, validateSettings, targetOf, migrateSettings, SECTION } = require('./settings');
 const { probeTcp } = require('./util');
 const { t } = require('./i18n');
@@ -73,6 +74,28 @@ function activate(context) {
 
     const statusBar = new StatusBar();
     const panel = new PanelProvider(context, { sessionMgr, prereq, auth, boardTools, jupyter });
+    const walkthrough = new WalkthroughState({
+        globalState: context.globalState,
+        setContext: (key, value) => vscode.commands.executeCommand('setContext', key, value)
+    });
+    // 시작 가이드 단계를 현재 상태에 맞춘다 (작업 공간이 열려 있으면 연결·열기 단계도 완료)
+    const syncWalkthrough = async (session) => {
+        try {
+            if (session) {
+                await walkthrough.markOpened();
+                await walkthrough.markConnected(targetOf(session));
+            }
+            const settings = getSettings();
+            const target = settings.host ? targetOf(settings) : undefined;
+            walkthrough.update({ target, keyOk: !!target && auth.wasKeyOk(target) });
+        } catch (error) {
+            log.debug(`Walkthrough state update failed: ${error.message}`);
+        }
+    };
+    const markConnected = async (target) => {
+        await walkthrough.markConnected(target);
+        await syncWalkthrough();
+    };
 
     context.subscriptions.push(
         statusBar,
@@ -83,6 +106,7 @@ function activate(context) {
         sessionMgr.onDidChange((status) => {
             statusBar.update(status);
             panel.postState();
+            syncWalkthrough(status && status.session);
         }),
         prereq.onDidChange(() => panel.postState()),
         boardTools.onDidChange(() => panel.postState()),
@@ -94,10 +118,12 @@ function activate(context) {
         vscode.workspace.onDidChangeConfiguration((event) => {
             if (event.affectsConfiguration(SECTION)) {
                 panel.postState();
+                syncWalkthrough();
             }
         }),
         // Interactive 창·노트북을 열거나 #%% 셀이 있는 파일을 볼 때 커널 선택기에 tOS 서버를 등록한다
         vscode.workspace.onDidOpenNotebookDocument(() => jupyter.registerCollection()),
+        vscode.window.onDidChangeActiveNotebookEditor((editor) => jupyter.onActiveNotebookEditor(editor)),
         vscode.window.onDidChangeActiveTextEditor((editor) => registerForCells(jupyter, editor)),
         vscode.window.registerWebviewViewProvider('tosRemote.panel', panel),
         vscode.window.registerTerminalLinkProvider(new TerminalLinkProvider(sessionMgr)),
@@ -112,19 +138,34 @@ function activate(context) {
     const commands = {
         'tosRemote.openWorkspace': () => sessionMgr.open(),
         'tosRemote.closeWorkspace': () => sessionMgr.close(),
-        'tosRemote.focusWorkspaceWindow': () => sessionMgr.openWorkspaceWindow(),
-        'tosRemote.testConnection': () => testConnection({ ssh, auth, prereq, panel, log }),
-        'tosRemote.setupSshKey': () => setupSshKey({ auth, prereq, sessionMgr, panel, log }),
+        'tosRemote.focusWorkspaceWindow': () => sessionMgr.focusWorkspaceWindow(),
+        'tosRemote.testConnection': () => testConnection({ ssh, auth, prereq, panel, log, markConnected }),
+        'tosRemote.setupSshKey': () => setupSshKey({ auth, prereq, sessionMgr, panel, log, markConnected }),
         'tosRemote.setPassword': () => setPassword({ auth, panel }),
         'tosRemote.clearPassword': () => clearPassword({ auth, panel }),
+        'tosRemote.selectLocalWorkspace': async () => {
+            const current = getSettings().localWorkspace;
+            const defaultUri = current ? vscode.Uri.file(current) : vscode.Uri.file(os.homedir());
+            const picked = await vscode.window.showOpenDialog({
+                canSelectFolders: true,
+                canSelectFiles: false,
+                canSelectMany: false,
+                title: t('Select Local Workspace Folder'),
+                defaultUri,
+                openLabel: t('Select Folder')
+            });
+            if (picked && picked[0]) {
+                await vscode.workspace.getConfiguration(SECTION).update('localWorkspace', picked[0].fsPath, vscode.ConfigurationTarget.Global);
+                panel.postState();
+            }
+        },
         'tosRemote.syncPythonLibraries': () => sessionMgr.syncLibraries(undefined, true),
-        'tosRemote.refreshDrive': () => sessionMgr.refreshDrive().catch((error) => sessionMgr.reportError(t('Could not refresh the drive.'), error)),
+        'tosRemote.refreshDrive': () => sessionMgr.refreshDrive().catch((error) => sessionMgr.reportError(t('Could not refresh the workspace.'), error)),
         'tosRemote.showLog': () => log.show(),
         'tosRemote.showRcloneLog': () => showRcloneLog(rclone),
         'tosRemote.openSettings': () => vscode.commands.executeCommand('workbench.action.openSettings', `@ext:${EXTENSION_ID}`),
         'tosRemote.openWalkthrough': () => vscode.commands.executeCommand('workbench.action.openWalkthrough', WALKTHROUGH_ID, false),
         'tosRemote.installRclone': () => prereq.installRclone(),
-        'tosRemote.installWinFsp': () => prereq.installWinFsp(),
         'tosRemote.installUv': () => prereq.installUv(),
         'tosRemote.runFile': (uri) => runner.runFile(uri),
         'tosRemote.debugFile': (uri) => runner.debugFile(uri),
@@ -144,8 +185,7 @@ function activate(context) {
     if (process.platform !== 'win32') {
         log.warn('tOS Remote currently supports Windows only.');
     }
-    const settings = getSettings();
-    vscode.commands.executeCommand('setContext', 'tosRemote.sshKeyReady', !!settings.host && auth.wasKeyOk(targetOf(settings)));
+    syncWalkthrough(sessionMgr.readSession());
     prereq.refresh().catch((error) => log.warn(`Prerequisite check error: ${error.message}`));
     // 이전 형식(/home/<user>/Workspace)의 작업 공간 설정을 먼저 바꾼 뒤 세션을 초기화한다
     migrateSettings(log)
@@ -154,12 +194,14 @@ function activate(context) {
         .then(() => {
             if (sessionMgr.isOwnerWindow()) {
                 // 이전에 시작한 보드 Jupyter 서버가 실행 중이면 다시 연결하고, 셀 실행 준비를 한다
-                jupyter.attach();
-                const jupyterExtension = vscode.extensions.getExtension('ms-toolsai.jupyter');
-                if (jupyterExtension && jupyterExtension.isActive) {
-                    jupyter.registerCollection();
-                }
-                registerForCells(jupyter, vscode.window.activeTextEditor);
+                jupyter.attach().finally(() => {
+                    const jupyterExtension = vscode.extensions.getExtension('ms-toolsai.jupyter');
+                    if (jupyterExtension && jupyterExtension.isActive) {
+                        jupyter.registerCollection();
+                    }
+                    registerForCells(jupyter, vscode.window.activeTextEditor);
+                    jupyter.onActiveNotebookEditor(vscode.window.activeNotebookEditor);
+                });
             }
         })
         .catch((error) => log.error(`Initialization error: ${error.stack || error.message}`));
@@ -172,10 +214,12 @@ function registerForCells(jupyter, editor) {
     const document = editor && editor.document;
     if (document && document.languageId === 'python' && document.lineCount < 20000 && CELL_MARKER.test(document.getText())) {
         jupyter.registerCollection();
+        // Interactive 창을 열기 전에 보드 커널이 준비되도록 서버를 미리 시작한다
+        jupyter.prepareForCells().catch((error) => jupyter.log.debug(`Jupyter auto-start failed: ${error.message}`));
     }
 }
 
-async function testConnection({ ssh, auth, prereq, panel, log }) {
+async function testConnection({ ssh, auth, prereq, panel, log, markConnected }) {
     const settings = getSettings();
     const invalid = validateSettings(settings);
     if (invalid) {
@@ -197,7 +241,6 @@ async function testConnection({ ssh, auth, prereq, panel, log }) {
             progress.report({ message: t('Checking SSH key authentication') });
             ssh.resetKnownHosts();
             if (await auth.keyWorks(settings, target)) {
-                await vscode.commands.executeCommand('setContext', 'tosRemote.sshKeyReady', true);
                 return { ok: true, message: t('SSH key authentication succeeded ({0})', server) };
             }
         }
@@ -213,7 +256,7 @@ async function testConnection({ ssh, auth, prereq, panel, log }) {
     });
     log.info(`Connection test: ${result.ok ? 'OK' : 'FAILED'} - ${result.message}`);
     if (result.ok) {
-        await vscode.commands.executeCommand('setContext', 'tosRemote.connectionTested', true);
+        await markConnected(target);
     }
     panel.setLastTest(result);
     (result.ok ? vscode.window.showInformationMessage : vscode.window.showWarningMessage)(result.message);
@@ -232,7 +275,7 @@ async function ensureRclone(prereq) {
     return !!(await prereq.installRclone());
 }
 
-async function setupSshKey({ auth, prereq, sessionMgr, panel, log }) {
+async function setupSshKey({ auth, prereq, sessionMgr, panel, log, markConnected }) {
     const settings = getSettings();
     const invalid = validateSettings(settings);
     if (invalid) {
@@ -257,7 +300,7 @@ async function setupSshKey({ auth, prereq, sessionMgr, panel, log }) {
             location: vscode.ProgressLocation.Notification,
             title: t('Registering SSH key')
         }, (progress) => auth.setupKey(settings, target, (message) => progress.report({ message })));
-        await vscode.commands.executeCommand('setContext', 'tosRemote.sshKeyReady', true);
+        await markConnected(target);
         panel.setLastTest({ ok: true, message: t('SSH key authentication succeeded ({0})', path.basename(result.keyPath)) });
         const session = sessionMgr.readSession();
         const message = result.alreadyRegistered ? t('The SSH key is already registered.') : t('The SSH key was registered on the board.');
@@ -325,7 +368,7 @@ async function showMenu(sessionMgr, jupyter) {
             ? { label: `$(debug-stop) ${t('Stop Jupyter on tOS')}`, command: 'tosRemote.stopJupyter' }
             : { label: `$(notebook) ${t('Start Jupyter on tOS')}`, command: 'tosRemote.startJupyter' });
         items.push({ label: `$(tools) ${t('Check Board Tools')}`, command: 'tosRemote.checkBoardTools' });
-        items.push({ label: `$(refresh) ${t('Refresh Drive')}`, command: 'tosRemote.refreshDrive' });
+        items.push({ label: `$(refresh) ${t('Pull from Board')}`, command: 'tosRemote.refreshDrive' });
         items.push({ label: `$(library) ${t('Sync Python Libraries')}`, command: 'tosRemote.syncPythonLibraries' });
     }
     items.push(

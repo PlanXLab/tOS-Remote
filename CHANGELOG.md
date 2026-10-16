@@ -2,6 +2,39 @@
 
 **English** | [한국어](CHANGELOG.ko.md)
 
+## 0.5.2
+
+- **Marketplace packaging without local build tools**: `scripts/build-vsix.ps1` creates an uploadable `.vsix` directly; no Node.js or `vsce` installation is needed.
+- **Jupyter extension is optional**: It is no longer recommended automatically; install it only when you want to use Jupyter cells.
+- **Safe window switching**: If the remote workspace is already open in another window, the extension opens the window switcher instead of replacing the current folder.
+- **Jupyter kernel selected automatically**: In the remote workspace window, opening a notebook or a Python file with `#%%` cells starts Jupyter on the board (when it is installed) and selects the board's kernel, so you no longer need **Select Another Kernel > tOS Remote > Python 3 (ipykernel)** every time. The first time on each board, the board's kernel list appears once; your choice is remembered. Interactive windows reuse the board kernel because the server is already running when they open. New setting `tosRemote.jupyterAutoSelectKernel` (default `true`).
+- **Getting Started matches the current setup**:
+  - The WinFsp step is removed; WinFsp is no longer installed or checked (the **Install WinFsp** command is removed too).
+  - Steps are checked from the actual state, without **Mark Done**: rclone installed, connection verified (a successful connection test, a working SSH key, or a workspace that has been opened), SSH key registered, and remote workspace opened. The results are kept across VS Code restarts.
+
+## 0.5.1
+
+- **Remote terminal on open**: When the remote workspace window opens and VS Code restores terminals from an earlier session (or creates one automatically), those local Windows terminals are replaced with the tOS SSH terminal. Only one board connection is opened, and Run on tOS task terminals are left alone. Local terminals that you open yourself afterwards are not changed.
+
+## 0.5.0
+
+- **Choose the window**: When opening the remote workspace, choose **Current Window** or **New Window**, so you can keep working in the window you already have open.
+- **Two-way sync**: Changes made outside VS Code are now synchronized too. Files and folders (including empty folders) created, changed, or deleted in Windows Explorer are sent to the board, and changes made on the board (for example, in the remote terminal) appear locally within a few seconds. If the same file changes on both sides, the more recently modified copy wins.
+- **Run on tOS**: Starts faster (only the file being run and pending changes are uploaded first, without rescanning the whole workspace). When the program exits, the terminal shows a termination message and waits for a key press.
+- **Debug on tOS**: A notification shows that debugging is being prepared, so it is clear the request was received.
+- **Fewer notifications**: Jupyter installation prompts no longer appear on their own; install Jupyter from the panel when you need it. The "unmet dependencies" warning after installing board tools is now written to the log only.
+
+## 0.4.0
+
+- **Hybrid Architecture (Local Workspace + Instant SFTP Sync)**:
+  - Eliminated the WinFsp virtual drive mount dependency. Files are stored directly on your PC's local SSD for lightning-fast Pylance indexing and responsive editor operations without Dropbear/SFTP bottlenecks or Explorer freezes.
+  - User-specifiable local workspace path (`tosRemote.localWorkspace`): prompt to select a folder on first open or configure via panel / settings.
+  - Automatic initial pull on connection and debounced (200ms) background upload on save via `rclone rcd operations/copyfile`.
+  - Reliable pre-run sync: `F5` (debug) and `Ctrl+F5` (run) flush pending uploads to the board before starting remote execution.
+  - Added **Pull from Board** command (`tosRemote.refreshDrive`) to pull board-side modifications into the local copy.
+  - Remote debugging binds debugpy to `127.0.0.1` on the board with SSH port forwarding (`-L`), improving network security.
+  - WinFsp is no longer a prerequisite for opening remote workspaces.
+
 ## 0.3.0
 
 - **Board tools**: Installs `debugpy` and `jupyter_server` + `ipykernel` into the board's global Python environment from the panel (**Board Tools**) or commands when they are missing. Nothing is installed if they are already there.

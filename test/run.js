@@ -18,6 +18,7 @@ const { localCachePath, parseDetectedPaths, isRequired, sessionLibraries } = req
 const board = require('../src/boardScripts');
 const { compileArgs, parsePylock, uvEnv } = require('../src/packageResolver');
 const { AskpassBroker, buildAskpassCmd } = require('../src/askpass');
+const { Syncer, toRelativePosix, isExcluded, DEFAULT_EXCLUDES } = require('../src/syncer');
 
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
@@ -105,6 +106,16 @@ test('rclone: 접속 문자열과 환경 변수', () => {
 
 test('workspaceFile: 설정·터미널·launch', () => {
     const ws = buildWorkspace({
+        localWorkspace: 'C:\\Users\\tos\\tOS\\Workspace',
+        drive: '',
+        target: { host: '10.0.0.2', port: 2222, user: 'tos' },
+        remoteWorkspace: "/home/tos/My Work",
+        sshPath: 'C:\\Windows\\System32\\OpenSSH\\ssh.exe',
+        sshArgs: ['-p', '2222'],
+        libraryCachePaths: ['C:\\cache\\a']
+    });
+    assert.strictEqual(ws.folders[0].path, 'C:/Users/tos/tOS/Workspace');
+    const wsDrive = buildWorkspace({
         drive: 'Y:',
         target: { host: '10.0.0.2', port: 2222, user: 'tos' },
         remoteWorkspace: "/home/tos/My Work",
@@ -112,21 +123,502 @@ test('workspaceFile: 설정·터미널·launch', () => {
         sshArgs: ['-p', '2222'],
         libraryCachePaths: ['C:\\cache\\a']
     });
-    assert.strictEqual(ws.folders[0].path, 'Y:/');
+    assert.strictEqual(wsDrive.folders[0].path, 'Y:/');
     assert.deepStrictEqual(ws.settings['python.analysis.extraPaths'], ['C:/cache/a']);
     const profile = ws.settings['terminal.integrated.profiles.windows'][ws.settings['terminal.integrated.defaultProfile.windows']];
     assert.deepStrictEqual(profile.args.slice(-3), ['-t', 'tos@10.0.0.2', `cd '/home/tos/My Work'; exec $SHELL -l`]);
+    assert.strictEqual(profile.overrideName, true, 'the tOS SSH terminal keeps its profile name');
     assert.strictEqual(ws.launch.configurations[0].type, 'tos-remote');
     assert.strictEqual(ws.launch.configurations[0].name, 'tOS: Current File');
+    assert.deepStrictEqual(ws.extensions.recommendations, ['ms-python.python', 'ms-python.debugpy']);
     JSON.parse(JSON.stringify(ws));
 });
 
-test('debugScript: 포트·경로 인용', () => {
+test('debugScript: 포트·경로 인용·루프백 바인딩', () => {
     const script = buildDebugScript({ remoteWorkspace: '/home/tos/Workspace', pythonCommand: 'python3', relativePath: "vision/it's.py", port: 5678 });
     assert.ok(script.includes(':162E '));
+    assert.ok(script.includes('--listen 127.0.0.1:5678'));
     assert.ok(script.includes(`--wait-for-client 'vision/it'\\''s.py' &`));
     assert.ok(script.endsWith('wait $P\n'));
     assert.ok(!script.includes('\r'));
+});
+
+test('syncer: 상대 경로·제외 규칙·스냅샷과 플러시', async () => {
+    const root = path.join('C:', 'work', 'project');
+    assert.strictEqual(toRelativePosix(root, path.join(root, 'vision', 'infer.py')), 'vision/infer.py');
+    assert.strictEqual(toRelativePosix(root, root), undefined);
+    assert.strictEqual(toRelativePosix(root, path.join('C:', 'work', 'other.py')), undefined);
+
+    assert.strictEqual(isExcluded('vision/infer.py'), false);
+    assert.strictEqual(isExcluded('.git/config'), true);
+    assert.strictEqual(isExcluded('.venv/lib/site.py'), true);
+    assert.strictEqual(isExcluded('venv/bin/activate'), true);
+    assert.strictEqual(isExcluded('a/__pycache__/b.cpython-312.pyc'), true);
+    assert.strictEqual(isExcluded('a/b.pyc'), true);
+    assert.strictEqual(isExcluded('a/b.tmp'), true);
+    assert.strictEqual(isExcluded('.vscode/settings.json'), true);
+    assert.ok(DEFAULT_EXCLUDES.includes('.git/**'));
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tos-syncer-test-'));
+    const calls = [];
+    const isWrite = (c) => c.type === 'rc' && c.command !== 'operations/list' && c.command !== 'operations/stat';
+    const remoteEntries = new Map();
+    const mockRclone = {
+        async runCli(args) {
+            calls.push({ type: 'cli', args });
+            return { code: 0, stdout: '', stderr: '' };
+        },
+        async call(command, params) {
+            calls.push({ type: 'rc', command, params });
+            if (command === 'operations/list') {
+                return { list: Array.from(remoteEntries.values()) };
+            }
+            if (command === 'operations/stat') {
+                return { item: remoteEntries.get(params.remote) || null };
+            }
+            if (command === 'operations/copyfile' && params.dstFs.startsWith(':sftp')) {
+                const source = path.join(params.srcFs, ...params.srcRemote.split('/'));
+                const stat = fs.statSync(source);
+                remoteEntries.set(params.dstRemote, {
+                    Path: params.dstRemote,
+                    Size: stat.size,
+                    ModTime: stat.mtime.toISOString(),
+                    IsDir: false
+                });
+            } else if (command === 'operations/deletefile') {
+                remoteEntries.delete(params.remote);
+            } else if (command === 'operations/mkdir') {
+                remoteEntries.set(params.remote, { Path: params.remote, IsDir: true });
+            }
+            return {};
+        }
+    };
+    const syncer = new Syncer({
+        rclone: mockRclone,
+        resolveAuth: async () => ({ type: 'password', obscured: 'OBSCURED' })
+    });
+    try {
+        fs.mkdirSync(path.join(tmpDir, 'sub'), { recursive: true });
+        fs.mkdirSync(path.join(tmpDir, '.git'), { recursive: true });
+        fs.writeFileSync(path.join(tmpDir, 'sub', 'a.py'), 'x = 1\n');
+        fs.writeFileSync(path.join(tmpDir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+
+        await syncer.initialPull(tmpDir, { host: '192.168.254.1', port: 22, user: 'tos' }, { type: 'password', obscured: 'OBSCURED' }, '/home/tos/Workspace');
+        assert.strictEqual(calls.filter((c) => c.type === 'cli').length, 1);
+        assert.strictEqual(calls[0].args[1], ':sftp:/home/tos/Workspace', 'password must not be in CLI args');
+
+        syncer.startWatch({
+            localWorkspace: tmpDir,
+            remoteWorkspace: '/home/tos/Workspace',
+            host: '192.168.254.1',
+            port: 22,
+            user: 'tos',
+            authType: 'password'
+        });
+
+        // 변경이 없으면 flush는 업로드를 수행하지 않는다
+        assert.strictEqual(await syncer.flush(5000), true);
+        assert.strictEqual(calls.filter(isWrite).length, 0);
+
+        // 파일 수정 및 새 파일 작성 직후 flush하면 감시 타이머를 기다리지 않고 즉시 업로드한다
+        fs.writeFileSync(path.join(tmpDir, 'sub', 'a.py'), 'x = 2\n');
+        fs.writeFileSync(path.join(tmpDir, 'sub', 'b.py'), 'y = 3\n');
+        assert.strictEqual(await syncer.flush(5000), true);
+        const rcCalls = calls.filter(isWrite);
+        assert.strictEqual(rcCalls.length, 2);
+        assert.deepStrictEqual(rcCalls.map((c) => [c.command, c.params.dstRemote]).sort(), [
+            ['operations/copyfile', 'sub/a.py'],
+            ['operations/copyfile', 'sub/b.py']
+        ]);
+
+        // 파일 삭제 후 flush하면 원격 삭제를 호출한다
+        fs.unlinkSync(path.join(tmpDir, 'sub', 'b.py'));
+        assert.strictEqual(await syncer.flush(5000), true);
+        const lastCall = calls.filter(isWrite).at(-1);
+        assert.strictEqual(lastCall.command, 'operations/deletefile');
+        assert.strictEqual(lastCall.params.remote, 'sub/b.py');
+
+        fs.mkdirSync(path.join(tmpDir, 'empty-folder'));
+        assert.strictEqual(await syncer.flush(5000), true);
+        const mkdirCall = calls.find((c) => c.command === 'operations/mkdir' && c.params.remote === 'empty-folder');
+        assert.ok(mkdirCall, 'empty local directories must be created on the board');
+    } finally {
+        syncer.dispose();
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+});
+
+test('syncer: remote terminal changes are pulled into the local workspace', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tos-sync-pull-test-'));
+    let remoteEntries = [];
+    const remoteFiles = new Map([['new-file.txt', 'created on board'], ['changed.txt', 'original']]);
+    const rclone = {
+        async call(command, params) {
+            if (command === 'operations/list') {
+                return { list: remoteEntries };
+            }
+            if (command === 'operations/copyfile' && path.normalize(params.dstFs) === path.normalize(tmpDir)) {
+                const destination = path.join(tmpDir, ...params.dstRemote.split('/'));
+                fs.mkdirSync(path.dirname(destination), { recursive: true });
+                fs.writeFileSync(destination, remoteFiles.get(params.srcRemote));
+            }
+            return {};
+        },
+        async runCli() {
+            return { code: 0, stdout: '', stderr: '' };
+        }
+    };
+    const syncer = new Syncer({ rclone, resolveAuth: async () => ({ type: 'key', keyPath: 'key' }) });
+    const session = {
+        localWorkspace: tmpDir,
+        remoteWorkspace: '/home/tos/Workspace',
+        host: 'board',
+        port: 22,
+        user: 'tos',
+        authType: 'key'
+    };
+    try {
+        fs.writeFileSync(path.join(tmpDir, 'changed.txt'), 'original');
+        syncer.recordSnapshot(tmpDir);
+        const timestamp = new Date().toISOString();
+        remoteEntries = [
+            { Path: 'new-file.txt', Size: 16, ModTime: timestamp, IsDir: false },
+            { Path: 'changed.txt', Size: 8, ModTime: timestamp, IsDir: false },
+            { Path: 'created-folder', IsDir: true }
+        ];
+        syncer.startWatch(session);
+        for (let attempt = 0; attempt < 20 && !fs.existsSync(path.join(tmpDir, 'new-file.txt')); attempt++) {
+            await util.sleep(20);
+        }
+        assert.strictEqual(fs.readFileSync(path.join(tmpDir, 'new-file.txt'), 'utf8'), 'created on board');
+        assert.strictEqual(fs.readFileSync(path.join(tmpDir, 'changed.txt'), 'utf8'), 'original', 'initial inventory must preserve matching workspace content');
+        assert.ok(fs.statSync(path.join(tmpDir, 'created-folder')).isDirectory());
+        while (syncer.remoteScanRunning) {
+            await util.sleep(10);
+        }
+
+        remoteFiles.set('changed.txt', 'updated on board');
+        remoteEntries = [
+            { Path: 'new-file.txt', Size: 16, ModTime: timestamp, IsDir: false },
+            { Path: 'changed.txt', Size: 16, ModTime: new Date(Date.now() + 5000).toISOString(), IsDir: false },
+            { Path: 'created-folder', IsDir: true }
+        ];
+        await syncer.syncRemoteChanges();
+        assert.strictEqual(fs.readFileSync(path.join(tmpDir, 'changed.txt'), 'utf8'), 'updated on board');
+    } finally {
+        syncer.dispose();
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+});
+
+test('syncer + rclone: 실제 rclone rcd·SFTP 서버와 양방향 동기화', async () => {
+    const { Rclone } = require('../src/rclone');
+    const { spawn } = require('child_process');
+    const candidates = [
+        'D:\\VSCode\\data\\user-data\\User\\globalStorage\\planxlab.tos-remote\\bin\\rclone.exe',
+        path.join(process.env.APPDATA || '', 'Code', 'User', 'globalStorage', 'planxlab.tos-remote', 'bin', 'rclone.exe')
+    ];
+    const rcloneExe = candidates.find((p) => p && fs.existsSync(p));
+    if (!rcloneExe) {
+        return;
+    }
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'tos-sftp-verify-'));
+    const serveDir = path.join(work, 'serve');
+    const localDir = path.join(work, 'local');
+    const storageDir = path.join(work, 'storage');
+    const cacheDir = path.join(work, 'cache');
+    fs.mkdirSync(serveDir, { recursive: true });
+
+    const port = await util.getFreePort();
+    const server = spawn(rcloneExe, ['serve', 'sftp', serveDir, '--addr', `127.0.0.1:${port}`, '--user', 'tos', '--pass', 'secret',
+        '--config', 'NUL', '--dir-cache-time', '100ms'], { windowsHide: true });
+    for (let i = 0; i < 50; i++) {
+        await util.sleep(100);
+        const p = await util.probeTcp('127.0.0.1', port, 500);
+        if (p.ok && p.banner) {
+            break;
+        }
+    }
+
+    const rclone = new Rclone({ storageDir, cacheDir, getExePath: () => rcloneExe });
+    const auth = { type: 'password', obscured: obscure('secret') };
+    const target = { host: '127.0.0.1', port, user: 'tos' };
+    const syncer = new Syncer({ rclone, resolveAuth: async () => auth });
+
+    try {
+        await rclone.ensureDaemon();
+        const fsString = sftpConnectionString(target, auth, '/home/tos/Workspace');
+        await rclone.mkdir(fsString);
+        await syncer.initialPull(localDir, target, auth, '/home/tos/Workspace');
+
+        syncer.startWatch({
+            localWorkspace: localDir,
+            remoteWorkspace: '/home/tos/Workspace',
+            host: '127.0.0.1',
+            port,
+            user: 'tos',
+            authType: 'password'
+        });
+
+        const localVision = path.join(localDir, 'vision');
+        fs.mkdirSync(localVision, { recursive: true });
+        const remoteFile = path.join(serveDir, 'home', 'tos', 'Workspace', 'vision', 'infer.py');
+        for (let i = 0; i < 10; i++) {
+            const content = `print("hello ${i}")\n`;
+            fs.writeFileSync(path.join(localVision, 'infer.py'), content);
+            const flushed = await syncer.flush(10000);
+            assert.strictEqual(flushed, true, `flush ${i} failed`);
+            assert.strictEqual(fs.readFileSync(remoteFile, 'utf8'), content, `content ${i} mismatch`);
+        }
+
+        fs.unlinkSync(path.join(localVision, 'infer.py'));
+        assert.strictEqual(await syncer.flush(10000), true);
+        assert.strictEqual(fs.existsSync(remoteFile), false, 'remote file should be deleted');
+        assert.strictEqual(fs.existsSync(path.join(localVision, 'infer.py')), false, 'deleted local file must not be pulled back');
+
+        // Explorer: empty local folder → board
+        fs.mkdirSync(path.join(localDir, 'from_explorer'));
+        assert.strictEqual(await syncer.flush(10000), true);
+        assert.ok(fs.statSync(path.join(serveDir, 'home', 'tos', 'Workspace', 'from_explorer')).isDirectory(), 'local folder must be created on the board');
+
+        // Remote terminal: folder and file created on the board → local
+        fs.mkdirSync(path.join(serveDir, 'home', 'tos', 'Workspace', 'from_terminal', 'sub'), { recursive: true });
+        fs.writeFileSync(path.join(serveDir, 'home', 'tos', 'Workspace', 'from_terminal', 'note.txt'), 'terminal');
+        await util.sleep(300);
+        await syncer.syncRemoteChanges();
+        assert.ok(fs.statSync(path.join(localDir, 'from_terminal', 'sub')).isDirectory(), 'board folder must appear locally');
+        assert.strictEqual(fs.readFileSync(path.join(localDir, 'from_terminal', 'note.txt'), 'utf8'), 'terminal');
+
+        fs.writeFileSync(path.join(serveDir, 'home', 'tos', 'Workspace', 'from_board.txt'), 'board-data');
+        await syncer.initialPull(localDir, target, auth, '/home/tos/Workspace');
+        assert.strictEqual(fs.readFileSync(path.join(localDir, 'from_board.txt'), 'utf8'), 'board-data');
+    } finally {
+        syncer.dispose();
+        await rclone.quitDaemon().catch(() => {});
+        server.kill();
+        await util.sleep(300);
+        fs.rmSync(work, { recursive: true, force: true });
+    }
+});
+
+test('remoteTerminal: 로컬 셸 터미널 판별', () => {
+    const { isLocalShellTerminal } = require('../src/remoteTerminal');
+    const script = 'C:\\Users\\a b\\AppData\\Roaming\\Code\\User\\globalStorage\\planxlab.tos-remote\\ssh-terminal.cmd';
+    const prefixes = ['Run on tOS: '];
+    assert.strictEqual(isLocalShellTerminal({ name: 'powershell', creationOptions: {} }, script, prefixes), true);
+    assert.strictEqual(isLocalShellTerminal({ name: 'pwsh', creationOptions: { shellPath: 'pwsh.exe' } }, script, prefixes), true);
+    assert.strictEqual(isLocalShellTerminal({ name: 'tOS SSH', creationOptions: {} }, script, prefixes), false);
+    assert.strictEqual(isLocalShellTerminal({ name: 'cmd', creationOptions: { shellArgs: ['/d', '/c', script.toUpperCase()] } }, script, prefixes), false);
+    assert.strictEqual(isLocalShellTerminal({ name: 'Run on tOS: a.py', creationOptions: {} }, script, prefixes), false);
+    assert.strictEqual(isLocalShellTerminal({ name: 'x', creationOptions: { pty: {} } }, script, prefixes), false);
+    assert.strictEqual(isLocalShellTerminal({ name: 'x', creationOptions: { hideFromUser: true } }, script, prefixes), false);
+});
+
+test('remoteTerminal: 복원된 로컬 터미널을 원격 터미널로 교체', () => {
+    const Module = require('module');
+    const created = [];
+    let openListener;
+    const makeTerminal = (name, creationOptions = {}) => ({
+        name, creationOptions, exitStatus: undefined, disposed: false, shown: false,
+        dispose() { this.disposed = true; },
+        show() { this.shown = true; }
+    });
+    const restored = makeTerminal('powershell');
+    const fakeVscode = {
+        window: {
+            terminals: [restored],
+            activeTerminal: restored,
+            onDidOpenTerminal: (fn) => { openListener = fn; return { dispose() { if (openListener === fn) { openListener = undefined; } } }; },
+            onDidCloseTerminal: () => ({ dispose() {} }),
+            createTerminal(options) {
+                const terminal = makeTerminal(options.name, options);
+                created.push(terminal);
+                fakeVscode.window.terminals.push(terminal);
+                return terminal;
+            }
+        },
+        ThemeIcon: class { constructor(id) { this.id = id; } }
+    };
+    const load = Module._load;
+    const modulePath = require.resolve('../src/remoteTerminal');
+    delete require.cache[modulePath];
+    Module._load = function (request, ...rest) {
+        return request === 'vscode' ? fakeVscode : load.call(this, request, ...rest);
+    };
+    let guard;
+    try {
+        const { RemoteTerminalGuard } = require('../src/remoteTerminal');
+        guard = new RemoteTerminalGuard({ graceMs: 1000000, excludedNamePrefixes: ['Run on tOS: '] });
+        guard.begin();
+        // 세션 준비 전에 VS Code가 자동으로 만든 터미널도 모은다
+        const autoCreated = makeTerminal('pwsh');
+        openListener(autoCreated);
+        assert.strictEqual(restored.disposed, false, 'nothing is replaced before the session is ready');
+
+        const launch = { shellPath: 'C:\\Windows\\System32\\cmd.exe', shellArgs: ['/d', '/c', 'C:\\s\\ssh-terminal.cmd'], scriptPath: 'C:\\s\\ssh-terminal.cmd' };
+        guard.activate(launch);
+        assert.strictEqual(restored.disposed, true);
+        assert.strictEqual(autoCreated.disposed, true);
+        assert.strictEqual(created.length, 1, 'only one board connection is opened');
+        assert.deepStrictEqual([created[0].name, created[0].creationOptions.shellPath, created[0].creationOptions.shellArgs],
+            ['tOS SSH', launch.shellPath, launch.shellArgs]);
+        assert.strictEqual(created[0].shown, true, 'the remote terminal takes the place of the active terminal');
+
+        // 잠시 동안 늦게 복원되는 로컬 터미널은 기존 원격 터미널로 대체하고, 원격·작업 터미널은 그대로 둔다
+        const late = makeTerminal('powershell');
+        openListener(late);
+        assert.strictEqual(late.disposed, true);
+        assert.strictEqual(created.length, 1, 'the existing remote terminal is reused');
+        const task = makeTerminal('Run on tOS: a.py');
+        openListener(task);
+        assert.strictEqual(task.disposed, false);
+        openListener(created[0]);
+        assert.strictEqual(created[0].disposed, false);
+
+        // 유예 시간이 끝난 뒤 사용자가 연 로컬 터미널은 건드리지 않는다
+        guard.stop();
+        assert.strictEqual(openListener, undefined, 'stops listening after the grace period');
+    } finally {
+        Module._load = load;
+        if (guard) {
+            guard.dispose();
+        }
+        delete require.cache[modulePath];
+    }
+});
+
+test('jupyterKernel: 컨트롤러 ID 규칙 (노트북·Interactive 창)', () => {
+    const { baseControllerId, controllerIdFor, boardKey, KERNEL_NOTEBOOK_TYPES } = require('../src/jupyterKernel');
+    const base = 'jupyter-remote?id=tos-remote&handle=tos-remote.python3.usr\\bin\\python3..-m#ipykernel_launcher';
+    assert.strictEqual(controllerIdFor(base, 'jupyter-notebook'), base);
+    assert.strictEqual(controllerIdFor(base, 'interactive'), `${base} (Interactive)`);
+    assert.strictEqual(baseControllerId(`${base} (Interactive)`), base);
+    assert.strictEqual(baseControllerId(base), base);
+    assert.strictEqual(boardKey({ user: 'tos', host: '192.168.254.1', port: 22 }), 'tos@192.168.254.1:22');
+    assert.strictEqual(boardKey(undefined), undefined);
+    assert.ok(KERNEL_NOTEBOOK_TYPES.has('jupyter-notebook') && KERNEL_NOTEBOOK_TYPES.has('interactive'));
+});
+
+test('jupyter: 커널 자동 선택 (처음 한 번 기억 → 이후 창 없이 선택)', async () => {
+    const Module = require('module');
+    const calls = [];
+    let selectResults = [];
+    let pickResult;
+    const notebook = { uri: { toString: () => 'file:///w/a.ipynb' }, notebookType: 'jupyter-notebook' };
+    const interactive = { uri: { toString: () => 'vscode-interactive:/i-1' }, notebookType: 'interactive' };
+    class EventEmitter { constructor() { this.event = () => ({ dispose() {} }); } fire() {} dispose() {} }
+    const fakeVscode = {
+        EventEmitter,
+        window: { activeNotebookEditor: { notebook } },
+        workspace: { getConfiguration: () => ({ get: (key, fallback) => fallback }) },
+        extensions: { getExtension: () => ({}) },
+        commands: {
+            async executeCommand(command, ...args) {
+                calls.push([command, ...args]);
+                if (command === 'notebook.selectKernel') {
+                    return selectResults.length ? selectResults.shift() : true;
+                }
+                if (command === 'jupyter.kernel.selectJupyterServerKernel') {
+                    return args[0] === 'PlanXLab.tos-remote' ? pickResult : undefined;
+                }
+                return undefined;
+            }
+        }
+    };
+    const memento = new Map();
+    const sessionMgr = {
+        isOwnerWindow: () => true,
+        readSession: () => ({ user: 'tos', host: '10.0.0.2', port: 22 }),
+        context: {
+            extension: { id: 'PlanXLab.tos-remote' },
+            globalState: { get: (key) => memento.get(key), update: async (key, value) => memento.set(key, value) }
+        }
+    };
+    const load = Module._load;
+    const modulePath = require.resolve('../src/jupyter');
+    delete require.cache[modulePath];
+    Module._load = function (request, ...rest) {
+        return request === 'vscode' ? fakeVscode : load.call(this, request, ...rest);
+    };
+    try {
+        const { JupyterManager } = require('../src/jupyter');
+        const manager = new JupyterManager({ log: { info() {}, warn() {}, debug() {} }, ssh: {}, sessionMgr, boardTools: {} });
+        manager.prepareForCells = async () => true;
+        manager.registerCollection = async () => { manager.collection = {}; };
+
+        // 처음: Jupyter 확장의 tOS Remote 커널 목록에서 한 번 고르고 기억한다
+        pickResult = 'BASE';
+        await manager.autoSelectKernel(notebook);
+        assert.deepStrictEqual(calls.map((c) => c[0]), ['jupyter.kernel.selectJupyterServerKernel', 'notebook.selectKernel']);
+        assert.deepStrictEqual(calls[0].slice(1), ['PlanXLab.tos-remote', 'tos-remote', notebook]);
+        assert.deepStrictEqual(calls[1][1], { id: 'BASE', extension: 'ms-toolsai.jupyter' });
+        assert.deepStrictEqual(memento.get('tosRemote.jupyterKernelIds'), { 'tos@10.0.0.2:22': 'BASE' });
+
+        // 이후: Interactive 창도 기억한 커널로 창 없이 선택 (컨트롤러가 준비될 때까지 다시 시도)
+        calls.length = 0;
+        fakeVscode.window.activeNotebookEditor = { notebook: interactive };
+        selectResults = [false, true];
+        await manager.autoSelectKernel(interactive);
+        assert.deepStrictEqual(calls.map((c) => c[0]), ['notebook.selectKernel', 'notebook.selectKernel']);
+        assert.deepStrictEqual(calls[1][1], { id: 'BASE (Interactive)', extension: 'ms-toolsai.jupyter' });
+
+        // 다른 편집기로 옮겨 가면 선택하지 않는다
+        calls.length = 0;
+        fakeVscode.window.activeNotebookEditor = undefined;
+        await manager.autoSelectKernel(notebook);
+        assert.strictEqual(calls.length, 0);
+
+        // 문서마다 한 번만 처리한다 (사용자가 직접 바꾼 커널을 다시 바꾸지 않음)
+        let runs = 0;
+        manager.autoSelectKernel = async () => { runs++; };
+        manager.onActiveNotebookEditor({ notebook });
+        manager.onActiveNotebookEditor({ notebook });
+        manager.onActiveNotebookEditor({ notebook: { uri: { toString: () => 'file:///w/a.py' }, notebookType: 'other' } });
+        assert.strictEqual(runs, 1);
+    } finally {
+        Module._load = load;
+        delete require.cache[modulePath];
+    }
+});
+
+test('walkthrough: Mark Done 없이 실제 상태로 단계 완료', async () => {
+    const { WalkthroughState, walkthroughContext } = require('../src/walkthrough');
+    const target = { host: '192.168.254.1', port: 22, user: 'tos' };
+    assert.deepStrictEqual(walkthroughContext({ target, keyOk: false, connectionOk: false, workspaceOpened: false }),
+        { 'tosRemote.sshKeyReady': false, 'tosRemote.boardConnected': false, 'tosRemote.workspaceOpened': false });
+    assert.strictEqual(walkthroughContext({ target, keyOk: true, connectionOk: false, workspaceOpened: false })['tosRemote.boardConnected'], true,
+        'a working SSH key means the connection works');
+    assert.strictEqual(walkthroughContext({ target: undefined, keyOk: false, connectionOk: false, workspaceOpened: true })['tosRemote.boardConnected'], true);
+
+    // VS Code를 다시 시작해도 저장된 결과로 완료 상태가 유지되고, 바뀐 키만 다시 알린다
+    const memento = new Map();
+    const globalState = { get: (key) => memento.get(key), update: async (key, value) => memento.set(key, value) };
+    const set = [];
+    const state = new WalkthroughState({ globalState, setContext: (key, value) => set.push([key, value]) });
+    state.update({ target, keyOk: false });
+    assert.strictEqual(set.length, 3);
+    await state.markConnected(target);
+    await state.markOpened();
+    set.length = 0;
+    state.update({ target, keyOk: false });
+    assert.deepStrictEqual(set, [['tosRemote.boardConnected', true], ['tosRemote.workspaceOpened', true]]);
+    set.length = 0;
+    state.update({ target, keyOk: false });
+    assert.deepStrictEqual(set, [], 'unchanged keys are not set again');
+    const restarted = new WalkthroughState({ globalState, setContext: () => {} });
+    assert.strictEqual(restarted.update({ target, keyOk: false })['tosRemote.workspaceOpened'], true);
+
+    // 매니페스트의 완료 조건은 이 모듈이 설정하는 키(또는 rclone 점검 키)만 사용하고, WinFsp 단계는 없다
+    const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    const steps = manifest.contributes.walkthroughs[0].steps;
+    assert.deepStrictEqual(steps.map((s) => s.id), ['rclone', 'board', 'sshKey', 'open']);
+    const known = new Set(['tosRemote.rcloneReady', ...Object.keys(walkthroughContext({}))]);
+    for (const step of steps) {
+        for (const event of step.completionEvents) {
+            assert.ok(event.startsWith('onContext:') && known.has(event.slice('onContext:'.length)), `${step.id}: ${event}`);
+        }
+    }
+    assert.ok(!JSON.stringify(manifest).toLowerCase().includes('winfsp'), 'WinFsp is no longer installed');
 });
 
 test('pyLibs: 캐시 경로', () => {
@@ -176,12 +668,14 @@ test('sshTerminal: cmd 배치 파일 (인용·% 이스케이프·재시도)', ()
     assert.throws(() => buildSshTerminalScript('ssh.exe', ['a&b']));
 });
 
-test('sshTerminal: tOS에서 실행 배치 파일 (명령줄 숨김·지연 확장·종료 코드 0)', () => {
+test('sshTerminal: tOS에서 실행 배치 파일 (명령줄 숨김·종료 메시지·키 입력 대기)', () => {
     const script = buildRunScript();
     const lines = script.split('\r\n');
     assert.ok(lines.includes('setlocal EnableDelayedExpansion'));
     assert.ok(lines.includes('!TOS_SSH_EXE! !TOS_SSH_ARGS!'), 'ssh must come from environment variables');
-    assert.ok(lines.includes('if not "%TOS_EXIT%"=="255" exit /b 0'));
+    assert.ok(lines.includes('if not "%TOS_EXIT%"=="255" goto terminated'));
+    assert.ok(lines.includes('pause >nul'));
+    assert.ok(script.includes('Terminated, press any key to close the terminal.'));
     assert.strictEqual(lines.filter((l) => l.startsWith('exit /b')).every((l) => l === 'exit /b 0'), true, 'must always exit 0');
     assert.ok(!/ssh\.exe|tos@/i.test(script), 'no user data in the batch file');
     assert.ok(!script.replace(/\r\n/g, '').includes('\n'));

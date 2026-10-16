@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const vscode = require('vscode');
 const {
@@ -13,6 +14,8 @@ const { isAuthError } = require('./auth');
 const { getSettings, validateSettings, targetOf } = require('./settings');
 const pyLibs = require('./pyLibs');
 const { obscure } = require('./obscure');
+const { Syncer } = require('./syncer');
+const { RemoteTerminalGuard } = require('./remoteTerminal');
 const { t } = require('./i18n');
 
 const HEARTBEAT_MS = 10000;
@@ -55,6 +58,13 @@ class SessionManager {
         this.closeRequested = false;
         this.watchdogFailures = 0;
         this.onBeforeClose = undefined;
+        this.syncer = new Syncer({
+            rclone: this.rclone,
+            resolveAuth: (session) => this.resolveSessionAuth(session),
+            logger: this.log
+        });
+        this.syncer.onDidChange(() => this.refreshStatus().catch(() => {}));
+        this.terminalGuard = new RemoteTerminalGuard({ log: this.log, excludedNamePrefixes: [t('Run on tOS: {0}', '')] });
     }
 
     // ---------------------------------------------------------------- 상태 파일
@@ -138,10 +148,15 @@ class SessionManager {
         let pendingUploads = 0;
         if (session || this.rclone.readState()) {
             daemon = await this.rclone.isDaemonAlive();
-            if (daemon && session) {
-                mounted = await this.rclone.isMounted(session.drive);
-                if (mounted) {
-                    pendingUploads = await this.rclone.pendingUploads();
+            if (session) {
+                if (session.localWorkspace) {
+                    mounted = fs.existsSync(session.localWorkspace);
+                    pendingUploads = this.syncer ? this.syncer.pendingCount : 0;
+                } else if (daemon && session.drive) {
+                    mounted = await this.rclone.isMounted(session.drive);
+                    if (mounted) {
+                        pendingUploads = await this.rclone.pendingUploads();
+                    }
                 }
             }
         }
@@ -176,7 +191,7 @@ class SessionManager {
         }, STATUS_INTERVAL_MS);
     }
 
-    // 원격 작업 공간을 닫으면 창이 빈 창으로 다시 로드되며, 이때 마운트 해제를 마무리한다
+    // 원격 작업 공간을 닫으면 창이 빈 창으로 다시 로드되며, 이때 정리를 마무리한다
     async resumePendingClose() {
         for (let i = 0; i < 4; i++) {
             const session = this.readSession();
@@ -194,24 +209,26 @@ class SessionManager {
     // 원격 작업 공간 창이 열렸을 때 (작업 공간 열기 직후 또는 VS Code 재시작으로 복원된 경우)
     async attach() {
         this.startHeartbeat();
+        // 이전 터미널 기록으로 복원된 로컬 터미널을 세션이 준비되는 대로 원격 터미널로 바꾼다
+        this.terminalGuard.begin();
         let session = this.readSession();
         if (session && session.state === 'closing') {
             session = { ...session, state: 'open' };
             this.writeSession(session);
         }
 
-        const mounted = !!session && (await this.rclone.isDaemonAlive()) && (await this.rclone.isMounted(session.drive));
-        if (!mounted) {
-            const folder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0];
-            const folderDrive = folder ? normalizeDriveLetter(folder.uri.fsPath.slice(0, 2)) : '';
+        const ready = !!session && (await this.rclone.isDaemonAlive())
+            && (session.localWorkspace ? fs.existsSync(session.localWorkspace) : (await this.rclone.isMounted(session.drive)));
+        if (!ready) {
             this.setBusy('reconnecting');
             try {
                 session = await vscode.window.withProgress({
                     location: vscode.ProgressLocation.Notification,
                     title: t('Reconnecting to the remote workspace')
-                }, (progress) => this.connect(getSettings(), session, progress, { interactive: true, preferredDrive: folderDrive }));
+                }, (progress) => this.connect(getSettings(), session, progress, { interactive: true }));
             } catch (error) {
                 this.setBusy(undefined);
+                this.terminalGuard.stop();
                 const retry = t('Retry');
                 const closeWorkspace = t('Close Workspace');
                 const pick = await this.reportError(t('Could not reconnect to the remote workspace.'), error, [retry, closeWorkspace]);
@@ -226,7 +243,6 @@ class SessionManager {
             }
             this.setBusy(undefined);
 
-            // 마운트 전에 시작된 탐색기·Pylance·터미널 설정을 새로 반영하기 위해 한 번 다시 로드
             const last = this.context.globalState.get('tosRemote.lastAutoReload') || 0;
             if (Date.now() - last > AUTO_RELOAD_GUARD_MS) {
                 await this.context.globalState.update('tosRemote.lastAutoReload', Date.now());
@@ -236,8 +252,13 @@ class SessionManager {
             await vscode.commands.executeCommand('workbench.files.action.refreshFilesExplorer');
         }
 
+        if (session && session.localWorkspace) {
+            this.syncer.startWatch(session);
+        }
+
         // 확장 업데이트·표시 언어 변경을 반영하도록 작업 공간 파일을 갱신(내용이 같으면 쓰지 않음)
         this.writeWorkspaceFile(session);
+        this.terminalGuard.activate(this.terminalLaunch());
         this.startWatchdog();
         // 창이 열릴 때 터미널 SSH 접속과 겹치지 않도록 라이브러리 동기화는 잠시 뒤에 시작한다
         this.librarySyncTimer = setTimeout(() => {
@@ -270,17 +291,21 @@ class SessionManager {
             return;
         }
         if (this.isOwnerWindow()) {
-            if (await this.rclone.isMounted(this.readSession() && this.readSession().drive)) {
+            const current = this.readSession();
+            if (current && ((current.localWorkspace && fs.existsSync(current.localWorkspace)) || await this.rclone.isMounted(current.drive))) {
                 vscode.window.showInformationMessage(t('The remote workspace is already open.'));
             } else {
-                await this.recover(this.readSession(), true);
+                await this.recover(current, true);
             }
             return;
         }
         const previous = this.readSession();
         if (previous && this.otherOwnerAlive()) {
-            // 이미 열린 창으로 이동 (원격 작업 공간은 한 창에서만 연다)
-            await this.openWorkspaceWindow();
+            const goTo = t('Go to That Window');
+            const pick = await vscode.window.showInformationMessage(t('The remote workspace is open in another window.'), goTo);
+            if (pick === goTo) {
+                await this.focusWorkspaceWindow();
+            }
             return;
         }
         const settings = getSettings();
@@ -291,6 +316,14 @@ class SessionManager {
             if (pick === openSettings) {
                 await vscode.commands.executeCommand('tosRemote.panel.focus');
             }
+            return;
+        }
+
+        const windowChoice = await vscode.window.showQuickPick([
+            { label: t('Current Window'), description: t('Replace the current workspace with the remote workspace.'), forceNewWindow: false },
+            { label: t('New Window'), description: t('Keep the current workspace open.'), forceNewWindow: true }
+        ], { placeHolder: t('Where should the remote workspace open?') });
+        if (!windowChoice) {
             return;
         }
 
@@ -307,11 +340,15 @@ class SessionManager {
             return;
         }
         this.setBusy(undefined);
-        await this.openWorkspaceWindow();
+        await this.openWorkspaceWindow(windowChoice.forceNewWindow);
     }
 
-    openWorkspaceWindow() {
-        return vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(this.workspaceFile), { forceNewWindow: false });
+    openWorkspaceWindow(forceNewWindow = false) {
+        return vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(this.workspaceFile), { forceNewWindow });
+    }
+
+    focusWorkspaceWindow() {
+        return vscode.commands.executeCommand('workbench.action.switchWindow');
     }
 
     pickDrive(configured, preferred) {
@@ -335,7 +372,7 @@ class SessionManager {
     }
 
     /**
-     * 보드 접속 → rclone 데몬 → 마운트 → 작업 공간 파일 생성까지 수행하고 세션을 기록한다.
+     * 보드 접속 → rclone 데몬 → 소스 동기화 → 작업 공간 파일 생성까지 수행하고 세션을 기록한다.
      */
     async connect(settings, previous, progress, options = {}) {
         const report = (message) => progress.report({ message });
@@ -382,21 +419,40 @@ class SessionManager {
             throw error;
         }
 
-        let drive;
-        const mounts = await this.rclone.listMounts();
-        const reusable = sameIdentity && previous.drive
-            && mounts.some((m) => String(m.MountPoint).toUpperCase() === previous.drive.toUpperCase());
-        if (reusable) {
-            drive = previous.drive;
-        } else {
-            for (const m of mounts) {
-                await this.waitForUploads(30000);
-                await this.rclone.unmount(m.MountPoint);
+        // 로컬 작업 사본 경로 결정
+        let localWorkspace = options.localWorkspace || settings.localWorkspace || (sameIdentity && previous && previous.localWorkspace);
+        if (!localWorkspace && options.interactive) {
+            const defaultFolder = path.join(os.homedir(), 'tOS', settings.workspaceFolder || 'Workspace');
+            const picked = await vscode.window.showOpenDialog({
+                canSelectFolders: true,
+                canSelectFiles: false,
+                canSelectMany: false,
+                title: t('Select Local Workspace Folder'),
+                defaultUri: vscode.Uri.file(defaultFolder),
+                openLabel: t('Select Folder')
+            });
+            if (picked && picked[0]) {
+                localWorkspace = picked[0].fsPath;
+                // 사용자가 지정한 경로를 설정에 저장
+                try {
+                    await vscode.workspace.getConfiguration('tosRemote').update('localWorkspace', localWorkspace, vscode.ConfigurationTarget.Global);
+                } catch {
+                    // 무시
+                }
             }
-            drive = this.pickDrive(settings.driveLetter, options.preferredDrive || (previous && previous.drive));
-            report(t('Mounting drive {0}', drive));
-            await this.rclone.mount(fsString, drive);
-            this.log.info(`Mounted ${identity} → ${drive}`);
+        }
+        if (!localWorkspace) {
+            localWorkspace = path.join(os.homedir(), 'tOS', settings.workspaceFolder || 'Workspace');
+        }
+
+        fs.mkdirSync(localWorkspace, { recursive: true });
+
+        // 보드 -> 로컬 소스 초기 동기화
+        report(t('Syncing source code from board'));
+        try {
+            await this.syncer.initialPull(localWorkspace, target, auth, settings.remoteWorkspace, (msg) => report(msg));
+        } catch (syncErr) {
+            this.log.warn(`Initial pull warning: ${syncErr.message}`);
         }
 
         const { libraries, aliases, tools } = await this.resolveLibraries(settings, target, auth, previous, sameIdentity, options, report);
@@ -409,18 +465,20 @@ class SessionManager {
             port: target.port,
             user: target.user,
             remoteWorkspace: settings.remoteWorkspace,
-            drive,
+            localWorkspace,
+            drive: '',
             authType: auth.type,
             keyPath: auth.type === 'key' ? auth.keyPath : undefined,
             pythonCommand: settings.pythonCommand,
             debugPort: settings.debugPort,
             libraries,
             libraryAliases: aliases,
-            // 보드 도구(debugpy·Jupyter) 확인 결과와 실행 중인 Jupyter 서버 정보는 같은 보드로 다시 연결해도 유지한다
             boardTools: tools ? { probe: tools, checkedAt: Date.now() } : kept.boardTools,
             jupyter: kept.jupyter,
             openedAt: Date.now()
         };
+
+        this.syncer.startWatch(session);
         this.writeWorkspaceFile(session);
         this.writeSession(session);
         return session;
@@ -428,7 +486,6 @@ class SessionManager {
 
     /**
      * IntelliSense용 보드 Python 라이브러리 경로 결정.
-     * 사용자 지정(필수) > 보드 자동 감지(전역 필수, ~/.local·가상 환경 선택) > 이전 세션 > 문서 기준 기본값
      */
     async resolveLibraries(settings, target, auth, previous, sameIdentity, options = {}, report = () => {}) {
         if (settings.pythonLibraryPaths.length) {
@@ -453,24 +510,35 @@ class SessionManager {
         return { libraries: pyLibs.defaultLibraries(target.user), aliases: [] };
     }
 
+    /** 작업 공간 터미널 프로필과 같은 SSH 터미널 실행 정보 */
+    terminalLaunch() {
+        const scriptPath = path.join(this.storageDir, 'ssh-terminal.cmd');
+        return {
+            shellPath: path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe'),
+            shellArgs: ['/d', '/c', scriptPath],
+            scriptPath
+        };
+    }
+
     writeWorkspaceFile(session) {
         const target = { host: session.host, port: session.port, user: session.user };
         const sshArgs = this.ssh.baseArgs(target, { keyPath: session.authType === 'key' ? session.keyPath : undefined });
 
         // SSH 터미널은 cmd 배치 파일로 실행한다 (연결 실패 재시도, 종료 코드 알림 방지)
-        const terminalScript = path.join(this.storageDir, 'ssh-terminal.cmd');
+        const launch = this.terminalLaunch();
         const script = buildSshTerminalScript(this.ssh.sshPath, sshTerminalArgs(sshArgs, target, session.remoteWorkspace));
-        writeIfChanged(terminalScript, script);
+        writeIfChanged(launch.scriptPath, script);
 
         const content = JSON.stringify(buildWorkspace({
+            localWorkspace: session.localWorkspace,
             drive: session.drive,
             target,
             remoteWorkspace: session.remoteWorkspace,
             sshPath: this.ssh.sshPath,
             sshArgs,
             terminal: {
-                path: path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe'),
-                args: ['/d', '/c', terminalScript]
+                path: launch.shellPath,
+                args: launch.shellArgs
             },
             libraryCachePaths: pyLibs.sessionLibraries(session).map((library) => pyLibs.localCachePath(library.remote))
         }), null, 4);
@@ -487,8 +555,8 @@ class SessionManager {
             let delay = WATCHDOG_INTERVAL_MS;
             const session = this.readSession();
             if (!this.busy && session && session.state === 'open') {
-                const ok = (await this.rclone.isDaemonAlive()) && (await this.rclone.isMounted(session.drive));
-                if (!ok) {
+                const daemonAlive = await this.rclone.isDaemonAlive();
+                if (!daemonAlive) {
                     delay = await this.recover(session, false);
                 } else {
                     this.watchdogFailures = 0;
@@ -502,28 +570,17 @@ class SessionManager {
     }
 
     async recover(session, interactive) {
-        this.log.warn('Mount lost. Reconnecting...');
+        this.log.warn('Connection lost. Reconnecting...');
         this.setBusy('reconnecting');
         try {
             const updated = await this.connect(getSettings(), session, { report() {} }, {
                 interactive,
                 quick: true,
-                preferredDrive: session && session.drive
+                localWorkspace: session && session.localWorkspace
             });
             this.watchdogFailures = 0;
-            this.log.info(`Reconnected (${updated.drive})`);
-            if (session && updated.drive !== session.drive) {
-                const reload = t('Reload Window');
-                const pick = await vscode.window.showWarningMessage(
-                    t('The drive changed from {0} to {1}. The window must be reloaded.', session.drive, updated.drive),
-                    reload
-                );
-                if (pick === reload) {
-                    await vscode.commands.executeCommand('workbench.action.reloadWindow');
-                }
-            } else {
-                await vscode.commands.executeCommand('workbench.files.action.refreshFilesExplorer');
-            }
+            this.log.info(`Reconnected (${updated.localWorkspace || updated.drive})`);
+            await vscode.commands.executeCommand('workbench.files.action.refreshFilesExplorer');
             return WATCHDOG_INTERVAL_MS;
         } catch (error) {
             this.watchdogFailures++;
@@ -555,7 +612,6 @@ class SessionManager {
             }
             this.closeRequested = true;
             this.setBusy('closing');
-            // 저장 확인 대화 상자에서 취소하면 창이 그대로 남으므로 상태를 되돌린다
             setTimeout(() => {
                 if (this.disposed || !this.closeRequested) {
                     return;
@@ -567,7 +623,6 @@ class SessionManager {
                 }
                 this.setBusy(undefined);
             }, 15000);
-            // 작업 공간을 먼저 닫고(창 재로드) 빈 창에서 마운트를 해제해야 열린 편집기·Pylance 오류가 생기지 않는다
             await vscode.commands.executeCommand('workbench.action.closeFolder');
             return;
         }
@@ -575,7 +630,7 @@ class SessionManager {
             const goTo = t('Go to That Window');
             const pick = await vscode.window.showInformationMessage(t('The remote workspace is open in another window. Close it from that window.'), goTo);
             if (pick === goTo) {
-                await this.openWorkspaceWindow();
+                await this.focusWorkspaceWindow();
             }
             return;
         }
@@ -594,33 +649,14 @@ class SessionManager {
                 location: vscode.ProgressLocation.Notification,
                 title: t('Closing the remote workspace')
             }, async (progress) => {
-                if (await this.rclone.isDaemonAlive()) {
-                    let flushed = await this.waitForUploads(60000, (count) => progress.report({ message: uploading(count) }));
-                    const keepWaiting = t('Keep Waiting');
-                    const forceClose = t('Close Anyway');
-                    while (!flushed) {
-                        const count = await this.rclone.pendingUploads();
-                        const pick = await vscode.window.showWarningMessage(
-                            t('{0} file(s) have not been uploaded to the board yet. Closing now may lose your changes.', count),
-                            { modal: true },
-                            keepWaiting,
-                            forceClose
-                        );
-                        if (pick === keepWaiting) {
-                            flushed = await this.waitForUploads(60000, (n) => progress.report({ message: uploading(n) }));
-                        } else if (pick === forceClose) {
-                            this.log.warn(`Closing with ${count} pending upload(s)`);
-                            break;
-                        } else {
-                            throw new Error(t('Close was canceled.'));
-                        }
-                    }
-                    progress.report({ message: t('Unmounting') });
-                    for (const m of await this.rclone.listMounts()) {
-                        await this.rclone.unmount(m.MountPoint);
-                    }
+                if (this.syncer) {
+                    progress.report({ message: uploading(this.syncer.pendingCount) });
+                    await this.syncer.flush(30000);
+                    this.syncer.stopWatch();
                 }
-                await this.rclone.quitDaemon();
+                if (await this.rclone.isDaemonAlive()) {
+                    await this.rclone.quitDaemon();
+                }
             });
             this.clearSession();
             this.log.info('Remote workspace closed');
@@ -637,31 +673,12 @@ class SessionManager {
         }
     }
 
-    /** VFS 쓰기 대기열이 빌 때까지 기다린다. @returns {Promise<boolean>} 모두 업로드되었는지 */
-    async waitForUploads(timeoutMs, onPending) {
-        const start = Date.now();
-        // WinFsp는 파일 닫기를 rclone에 비동기로 전달하므로, 저장 직후에는 대기열이 잠시 비어 보일 수 있다.
-        // 잠깐 기다린 뒤 연속 두 번 비어 있을 때만 완료로 본다.
-        await sleep(300);
-        let emptyChecks = 0;
-        for (;;) {
-            const count = await this.rclone.pendingUploads();
-            if (count === 0) {
-                emptyChecks++;
-                if (emptyChecks >= 2) {
-                    return true;
-                }
-            } else {
-                emptyChecks = 0;
-                if (onPending) {
-                    onPending(count);
-                }
-            }
-            if (Date.now() - start > timeoutMs) {
-                return false;
-            }
-            await sleep(300);
+    /** 업로드 완료 대기 */
+    async waitForUploads(timeoutMs) {
+        if (this.syncer) {
+            return this.syncer.flush(timeoutMs);
         }
+        return true;
     }
 
     // ---------------------------------------------------------------- 기타 기능
@@ -684,11 +701,6 @@ class SessionManager {
         return { type: 'password', obscured: obscure(password) };
     }
 
-    /**
-     * 화면 없이 실행하는 ssh(원격 명령·디버그·Jupyter)용 인증. 키 인증이 아니면 저장된 비밀번호를 SSH_ASKPASS로 넘긴다.
-     * @param {{interactive?: boolean}} options interactive면 저장된 비밀번호가 없을 때 입력받는다
-     * @returns {Promise<{keyPath: string} | {password: string}>}
-     */
     async sshAuth(session, options = {}) {
         if (session.authType === 'key' && session.keyPath) {
             return { keyPath: session.keyPath };
@@ -704,11 +716,6 @@ class SessionManager {
         return { password };
     }
 
-    /**
-     * @param {{remote: string, kind: string}[]|undefined} libraries 동기화할 라이브러리. 비우면(수동 동기화) 보드에서 다시 감지해 전체를 동기화한다.
-     * @param {boolean} notify 완료 알림 표시 여부 (수동 동기화)
-     * 필수 경로(전역·사용자 지정)의 실패만 알림창으로 표시하고, 선택 경로(~/.local·가상 환경)는 없거나 실패해도 로그만 남긴다.
-     */
     async syncLibraries(libraries, notify) {
         let session = this.readSession();
         if (!session) {
@@ -730,7 +737,6 @@ class SessionManager {
         try {
             const auth = await this.resolveSessionAuth(session);
 
-            // 수동 동기화: 작업 중 새로 만든 가상 환경(uv venv 등)을 반영하기 위해 경로를 다시 감지한다
             if (!libraries && !getSettings().pythonLibraryPaths.length) {
                 const sshAuth = await this.sshAuth(session).catch(() => undefined);
                 const detected = sshAuth
@@ -807,24 +813,34 @@ class SessionManager {
         }
     }
 
+    /** 보드에서 로컬로 최신 파일 가져오기 (Pull) */
     async refreshDrive() {
-        if (!(await this.rclone.isDaemonAlive())) {
-            vscode.window.showInformationMessage(t('No drive is mounted.'));
+        const session = this.readSession();
+        if (!session || !session.localWorkspace) {
+            vscode.window.showInformationMessage(t('No remote workspace is open.'));
             return;
         }
-        await this.rclone.refresh();
+        const target = { host: session.host, port: session.port, user: session.user };
+        const auth = await this.resolveSessionAuth(session);
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: t('Pulling changes from the board')
+        }, async (progress) => {
+            await this.syncer.initialPull(session.localWorkspace, target, auth, session.remoteWorkspace, (msg) => progress.report({ message: msg }));
+        });
         await vscode.commands.executeCommand('workbench.files.action.refreshFilesExplorer');
-        vscode.window.setStatusBarMessage(t('tOS: Drive refreshed.'), 3000);
+        vscode.window.setStatusBarMessage(t('tOS: Synced from board.'), 3000);
     }
 
     /** 터미널 링크·디버그 경로 매핑용 (원격 경로 → 로컬 경로) */
     getPathMappings() {
         const session = this.cachedSession;
-        if (!session || !session.drive) {
+        if (!session) {
             return [];
         }
+        const localRoot = session.localWorkspace ? path.normalize(session.localWorkspace) : `${session.drive}\\`;
         return [
-            { remote: session.remoteWorkspace, local: `${session.drive}\\` },
+            { remote: session.remoteWorkspace, local: localRoot },
             ...pyLibs.sessionLibraries(session).map((library) => ({ remote: library.remote, local: pyLibs.localCachePath(library.remote) })),
             ...(session.libraryAliases || []).map((alias) => ({ remote: alias.remote, local: pyLibs.localCachePath(alias.real) }))
         ];
@@ -850,6 +866,10 @@ class SessionManager {
         clearInterval(this.heartbeatTimer);
         clearTimeout(this.watchdogTimer);
         clearTimeout(this.librarySyncTimer);
+        this.terminalGuard.dispose();
+        if (this.syncer) {
+            this.syncer.dispose();
+        }
         const owner = readJson(this.ownerFile);
         if (owner && owner.pid === process.pid) {
             removeFile(this.ownerFile);

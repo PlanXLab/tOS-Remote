@@ -14,6 +14,7 @@ const ALLOWED_COMMANDS = new Set([
     'tosRemote.setupSshKey',
     'tosRemote.setPassword',
     'tosRemote.clearPassword',
+    'tosRemote.selectLocalWorkspace',
     'tosRemote.syncPythonLibraries',
     'tosRemote.refreshDrive',
     'tosRemote.showLog',
@@ -21,7 +22,6 @@ const ALLOWED_COMMANDS = new Set([
     'tosRemote.openSettings',
     'tosRemote.openWalkthrough',
     'tosRemote.installRclone',
-    'tosRemote.installWinFsp',
     'tosRemote.installUv',
     'tosRemote.checkBoardTools',
     'tosRemote.installDebugTools',
@@ -44,7 +44,7 @@ function webviewStrings() {
         phaseClosing: t('Closing...'),
         phaseOpen: t('Remote workspace open'),
         phaseElsewhere: t('Open in another window'),
-        phaseDetached: t('Drive still mounted (window closed)'),
+        phaseDetached: t('Remote workspace detached'),
         authKey: t('Auth: SSH key'),
         authPassword: t('Auth: password'),
         pendingUploads: t('Pending uploads to the board: {0}'),
@@ -52,7 +52,7 @@ function webviewStrings() {
         openWorkspace: t('▶ Open Remote Workspace'),
         reopenWorkspace: t('▶ Reopen Remote Workspace'),
         closeWorkspace: t('■ Close Remote Workspace'),
-        unmount: t('■ Unmount'),
+        unmount: t('■ Close Workspace'),
         settingsLocked: t('Close the remote workspace to change board settings.'),
         keyOk: t('Using SSH key authentication'),
         keyUnverified: t('SSH key found (not verified on the board)'),
@@ -164,11 +164,13 @@ class PanelProvider {
                 port: settings.port,
                 user: settings.user,
                 remoteWorkspace: settings.workspaceFolder,
+                localWorkspace: settings.localWorkspace || '',
                 driveLetter: settings.driveLetter
             },
             phase: status.phase || 'idle',
             session: session ? {
                 drive: session.drive,
+                localWorkspace: session.localWorkspace,
                 host: session.host,
                 port: session.port,
                 user: session.user,
@@ -180,7 +182,6 @@ class PanelProvider {
             libSyncRunning: !!sessionMgr.libSyncRunning,
             prereq: {
                 checked: !!prereq.checked,
-                winfsp: !!prereq.state.winfsp,
                 ssh: !!prereq.state.ssh,
                 rcloneVersion: prereq.state.rcloneVersion,
                 customRclone: !!settings.rclonePath,
@@ -203,9 +204,6 @@ class PanelProvider {
         const css = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'panel.css'));
         const js = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'panel.js'));
         const h = escapeHtml;
-        const drives = ['Z', 'Y', 'X', 'W', 'V', 'U', 'T', 'S', 'R', 'Q', 'P', 'O', 'N', 'M', 'L', 'K', 'J', 'I', 'H', 'G', 'F', 'E', 'D']
-            .map((d) => `<option value="${d}:">${d}:</option>`).join('');
-        // JSON 안의 '<'를 이스케이프해 </script>로 해석되지 않게 한다
         const strings = JSON.stringify(webviewStrings()).replace(/</g, '\\u003c');
         const lang = vscode.env.language && vscode.env.language.startsWith('ko') ? 'ko' : 'en';
         return `<!DOCTYPE html>
@@ -246,8 +244,11 @@ class PanelProvider {
             <span class="prefix" id="workspacePrefix">/home/tos/</span>
             <input id="remoteWorkspace" data-setting="remoteWorkspace" type="text" spellcheck="false" placeholder="Workspace">
         </div>
-        <label for="driveLetter">${h(t('Drive'))}</label>
-        <select id="driveLetter" data-setting="driveLetter"><option value="">${h(t('Auto'))}</option>${drives}</select>
+        <label for="localWorkspace">${h(t('Local Folder'))}</label>
+        <div style="display:flex;gap:4px;">
+            <input id="localWorkspace" data-setting="localWorkspace" type="text" spellcheck="false" placeholder="C:\\Workspace\\my-project">
+            <button class="secondary" id="btnSelectLocal" data-command="tosRemote.selectLocalWorkspace" style="white-space:nowrap;">${h(t('Browse'))}</button>
+        </div>
     </div>
     <div class="hint" id="formHint"></div>
     <div class="row">
@@ -270,8 +271,6 @@ class PanelProvider {
 <details id="prereqSection">
     <summary>${h(t('Prerequisites'))} <span class="summary-badge" id="prereqBadge"></span></summary>
     <div class="check-list">
-        <div class="check"><span class="mark" id="winfspMark"></span><span>WinFsp</span>
-            <button class="link" id="btnWinFsp" data-command="tosRemote.installWinFsp">${h(t('Install'))}</button></div>
         <div class="check"><span class="mark" id="rcloneMark"></span><span id="rcloneText">rclone</span>
             <button class="link" id="btnRclone" data-command="tosRemote.installRclone">${h(t('Download'))}</button></div>
         <div class="check"><span class="mark" id="sshMark"></span><span>${h(t('OpenSSH Client'))}</span></div>
@@ -306,7 +305,7 @@ class PanelProvider {
     <summary>${h(t('Tools'))}</summary>
     <div class="tools">
         <button class="link" id="btnSync" data-command="tosRemote.syncPythonLibraries">${h(t('Sync Python Libraries'))}</button>
-        <button class="link" id="btnRefresh" data-command="tosRemote.refreshDrive">${h(t('Refresh Drive'))}</button>
+        <button class="link" id="btnRefresh" data-command="tosRemote.refreshDrive">${h(t('Pull from Board'))}</button>
         <button class="link" data-command="tosRemote.showLog">${h(t('Show Log'))}</button>
         <button class="link" data-command="tosRemote.showRcloneLog">${h(t('rclone Log'))}</button>
         <button class="link" data-command="tosRemote.openSettings">${h(t('All Settings'))}</button>

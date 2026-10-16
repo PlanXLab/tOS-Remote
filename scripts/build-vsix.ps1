@@ -1,16 +1,14 @@
 ﻿<#
 .SYNOPSIS
-    Node.js/vsce 없이 로컬 설치 테스트용 tOS Remote 패키지(*-local.vsix)를 만든다.
+    Node.js/vsce 없이 tOS Remote Marketplace 패키지(.vsix)를 만든다.
 
 .DESCRIPTION
-    Marketplace 업로드용이 아니다. Marketplace에는 반드시 공식 도구로 만든 패키지를 올린다:
-        npx @vscode/vsce package --out dist/      (또는 npx @vscode/vsce publish)
-    vsce는 README 상대 링크를 저장소 URL로 바꾸고 저장소·브랜딩 정보를 매니페스트에 넣는 등
-    이 스크립트가 하지 않는 처리를 한다. 혼동을 막기 위해 출력 파일 이름에 -local을 붙인다.
+    package.json과 확장 소스를 VSIX로 묶는다. Node.js나 빌드 도구가 필요하지 않으며,
+    생성된 파일은 Visual Studio Marketplace의 게시자 페이지에서 업로드할 수 있다.
 
 .EXAMPLE
     .\scripts\build-vsix.ps1
-    code --install-extension .\dist\tos-remote-0.3.0-local.vsix
+    code --install-extension .\dist\tos-remote-0.5.2.vsix
 #>
 param(
     [string]$OutDir
@@ -96,7 +94,7 @@ $contentTypes = '<?xml version="1.0" encoding="utf-8"?><Types xmlns="http://sche
     '</Types>'
 
 New-Item -ItemType Directory -Force $OutDir | Out-Null
-$vsix = Join-Path $OutDir "$($package.name)-$($package.version)-local.vsix"
+$vsix = Join-Path $OutDir "$($package.name)-$($package.version).vsix"
 if (Test-Path $vsix) { Remove-Item $vsix -Force }
 
 $zip = [IO.Compression.ZipFile]::Open($vsix, [IO.Compression.ZipArchiveMode]::Create)
@@ -116,4 +114,4 @@ try {
 }
 
 Write-Host "Created: $vsix ($($files.Count) files, $([int]((Get-Item $vsix).Length / 1KB)) KB)" -ForegroundColor Green
-Write-Host 'For local install testing only. For the Marketplace, use: npx @vscode/vsce package --out dist/' -ForegroundColor Yellow
+Write-Host 'Upload this VSIX from the Visual Studio Marketplace publisher page.' -ForegroundColor Green

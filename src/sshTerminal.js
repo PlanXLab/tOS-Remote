@@ -78,7 +78,7 @@ function buildSshTerminalScript(sshPath, sshArgs) {
  * "tOS에서 실행" 작업용 배치 파일 (내용이 고정되어 사용자 경로·파일 이름이 들어가지 않는다).
  * - ssh 경로와 인자는 환경 변수 TOS_SSH_EXE, TOS_SSH_ARGS로 받아 지연 확장(!VAR!)으로 실행한다.
  *   확장된 값은 배치 구문으로 다시 해석되지 않으므로 & % ^ ! " 같은 문자가 그대로 전달된다.
- * - 항상 0으로 끝내 VS Code가 ssh 명령줄이 담긴 종료 메시지를 표시하지 않게 한다. 연결 실패(255)만 짧게 안내한다.
+ * - 실행 완료를 터미널에 표시하고 키 입력을 기다려 사용자가 종료를 확인할 수 있게 한다.
  * - 프로그램이 다시 실행되지 않도록 재시도하지 않는다.
  */
 function buildRunScript() {
@@ -88,9 +88,15 @@ function buildRunScript() {
         'setlocal EnableDelayedExpansion',
         '!TOS_SSH_EXE! !TOS_SSH_ARGS!',
         'endlocal & set TOS_EXIT=%errorlevel%',
-        'if not "%TOS_EXIT%"=="255" exit /b 0',
+        'if not "%TOS_EXIT%"=="255" goto terminated',
         'echo.',
         echoLine(`[tOS] ${t('The connection to the board failed or was lost (ssh exit code 255).')}`),
+        'goto done',
+        ':terminated',
+        'echo.',
+        echoLine(`[tOS] ${t('Terminated, press any key to close the terminal.')}`),
+        'pause >nul',
+        ':done',
         'exit /b 0',
         ''
     ].join('\r\n');

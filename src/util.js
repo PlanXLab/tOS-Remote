@@ -133,7 +133,6 @@ function getProcessImageName(pid) {
 function getFreePort() {
     return new Promise((resolve, reject) => {
         const server = net.createServer();
-        server.unref();
         server.on('error', reject);
         server.listen(0, '127.0.0.1', () => {
             const { port } = server.address();

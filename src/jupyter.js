@@ -7,6 +7,7 @@ const http = require('http');
 const vscode = require('vscode');
 const scripts = require('./boardScripts');
 const { getFreePort, randomToken, sleep, lastLine } = require('./util');
+const { baseControllerId, controllerIdFor, boardKey, KERNEL_NOTEBOOK_TYPES } = require('./jupyterKernel');
 const { t } = require('./i18n');
 
 const JUPYTER_EXTENSION_ID = 'ms-toolsai.jupyter';
@@ -14,6 +15,11 @@ const COLLECTION_ID = 'tos-remote';
 const SERVER_ID = 'tos-remote';
 const TUNNEL_TIMEOUT_MS = 20000;
 const RECONNECT_DELAYS_MS = [2000, 5000, 15000, 30000];
+const KERNEL_IDS_KEY = 'tosRemote.jupyterKernelIds';
+// 서버를 막 시작했을 때 Jupyter 확장이 커널 목록을 가져와 컨트롤러를 만들 때까지 기다리는 시간
+const SELECT_ATTEMPTS = 20;
+const SELECT_INTERVAL_MS = 500;
+const PREPARE_RETRY_MS = 60000;
 
 /** 포워딩된 Jupyter REST API 요청 (토큰 인증) */
 function jupyterRequest(port, token, method, pathName, timeoutMs = 5000) {
@@ -60,6 +66,8 @@ class JupyterManager {
         this.emitter = new vscode.EventEmitter();
         this.onDidChange = this.emitter.event;
         this.serversEmitter = new vscode.EventEmitter();
+        this.kernelHandled = new Set();
+        this.lastPrepareFailure = 0;
     }
 
     status() {
@@ -129,18 +137,7 @@ class JupyterManager {
             const session = this.boardTools.requireSession();
             const probe = await this.boardTools.ensureProbe({ interactive });
             if (!scripts.toolStatus(probe).jupyter.ready) {
-                if (!interactive) {
-                    throw new Error(t('Jupyter is not installed on the board.'));
-                }
-                const install = t('Install');
-                const pick = await vscode.window.showWarningMessage(
-                    t('Jupyter (jupyter_server, ipykernel) is not installed on the board. Install it now? Packages are downloaded on this PC and copied to the board (sudo password may be required).'),
-                    { modal: true },
-                    install
-                );
-                if (pick !== install || !(await this.boardTools.install('jupyter'))) {
-                    return false;
-                }
+                throw new Error(t('Jupyter is not installed on the board. Install it from the tOS Remote panel when you need it.'));
             }
             this.setState({ phase: 'starting', error: undefined });
             const auth = await this.sessionMgr.sshAuth(session, { interactive });
@@ -150,7 +147,7 @@ class JupyterManager {
             }, async () => {
                 const remote = await this.runScript(session, auth, 'start', { token: randomToken(24) });
                 if (remote.state === 'missing') {
-                    throw new Error(t('Jupyter is not installed on the board.'));
+                    throw new Error(t('Jupyter is not installed on the board. Install it from the tOS Remote panel when you need it.'));
                 }
                 if (remote.state !== 'running' && remote.state !== 'started') {
                     throw new Error(t('The Jupyter server did not start on the board: {0}', maskToken(remote.message || remote.state)));
@@ -305,7 +302,16 @@ class JupyterManager {
     }
 
     /** 원격 작업 공간 창이 열릴 때: 이전에 시작한 서버가 실행 중이면 다시 연결한다. */
-    async attach() {
+    attach() {
+        if (!this.attaching) {
+            this.attaching = this.doAttach().finally(() => {
+                this.attaching = undefined;
+            });
+        }
+        return this.attaching;
+    }
+
+    async doAttach() {
         const session = this.boardTools.currentSession();
         if (!session || !session.jupyter || this.state.phase !== 'stopped') {
             return;
@@ -399,17 +405,140 @@ class JupyterManager {
 
     async showRunningMessage() {
         if (!vscode.extensions.getExtension(JUPYTER_EXTENSION_ID)) {
-            const install = t('Install Jupyter Extension');
-            const pick = await vscode.window.showWarningMessage(
-                t('Jupyter is running on tOS. Install the Jupyter extension (ms-toolsai.jupyter) to run notebook and #%% cells on the board.'),
-                install
-            );
-            if (pick === install) {
-                await vscode.commands.executeCommand('workbench.extensions.installExtension', JUPYTER_EXTENSION_ID);
-            }
             return;
         }
         vscode.window.showInformationMessage(t('Jupyter is running on tOS. To run cells on the board, choose "tOS Remote" in Select Kernel.'));
+    }
+
+    // ---------------------------------------------------------------- 커널 자동 선택
+
+    autoSelectEnabled() {
+        return vscode.workspace.getConfiguration('tosRemote').get('jupyterAutoSelectKernel', true) !== false
+            && this.sessionMgr.isOwnerWindow()
+            && !!vscode.extensions.getExtension(JUPYTER_EXTENSION_ID);
+    }
+
+    /**
+     * 노트북이나 #%% 셀 파일을 열면 보드 Jupyter 서버를 미리 시작한다.
+     * Interactive 창은 만들 때 컨트롤러가 이미 있어야 마지막에 쓴 tOS 커널을 다시 고르기 때문이다.
+     * 보드에 Jupyter가 없으면 아무것도 하지 않는다 (설치는 사용자가 필요할 때 패널에서).
+     * @returns {Promise<boolean>} 서버가 실행 중이면 true
+     */
+    async prepareForCells() {
+        if (!this.autoSelectEnabled()) {
+            return false;
+        }
+        if (this.attaching) {
+            await this.attaching;
+        }
+        if (this.running) {
+            return true;
+        }
+        if (this.state.phase === 'reconnecting' || this.state.phase === 'stopping') {
+            return false;
+        }
+        if (!this.starting && Date.now() - this.lastPrepareFailure < PREPARE_RETRY_MS) {
+            return false;
+        }
+        try {
+            const probe = await this.boardTools.ensureProbe();
+            if (!scripts.toolStatus(probe).jupyter.ready) {
+                return false;
+            }
+        } catch (error) {
+            this.lastPrepareFailure = Date.now();
+            this.log.debug(`Jupyter auto-start skipped: ${error.message}`);
+            return false;
+        }
+        const started = await this.start({ interactive: false });
+        if (!started) {
+            this.lastPrepareFailure = Date.now();
+        }
+        return started;
+    }
+
+    /** 활성 노트북 편집기(노트북·Interactive 창)가 바뀌면 문서마다 한 번 tOS 커널을 고른다. */
+    onActiveNotebookEditor(editor) {
+        if (!editor || !KERNEL_NOTEBOOK_TYPES.has(editor.notebook.notebookType) || !this.autoSelectEnabled()) {
+            return;
+        }
+        const key = editor.notebook.uri.toString();
+        if (this.kernelHandled.has(key)) {
+            return;
+        }
+        this.kernelHandled.add(key);
+        this.autoSelectKernel(editor.notebook)
+            .catch((error) => this.log.warn(`Jupyter kernel auto-selection failed: ${error.message}`));
+    }
+
+    isActiveNotebook(notebook) {
+        const editor = vscode.window.activeNotebookEditor;
+        return !!editor && editor.notebook === notebook;
+    }
+
+    async autoSelectKernel(notebook) {
+        if (!(await this.prepareForCells())) {
+            return;
+        }
+        await this.registerCollection();
+        if (!this.collection || !this.isActiveNotebook(notebook)) {
+            return;
+        }
+        const board = boardKey(this.sessionMgr.readSession());
+        const state = this.sessionMgr.context.globalState;
+        const ids = state.get(KERNEL_IDS_KEY) || {};
+        const baseId = ids[board];
+        if (baseId) {
+            // notebook.selectKernel은 해당 컨트롤러가 아직 없으면 창을 띄우지 않고 false를 돌려준다
+            const wanted = controllerIdFor(baseId, notebook.notebookType);
+            for (let i = 0; i < SELECT_ATTEMPTS; i++) {
+                if (!this.isActiveNotebook(notebook)) {
+                    return;
+                }
+                if (await vscode.commands.executeCommand('notebook.selectKernel', { id: wanted, extension: JUPYTER_EXTENSION_ID })) {
+                    this.log.info(`Selected the tOS Jupyter kernel for ${notebook.uri.toString(true)}`);
+                    return;
+                }
+                await sleep(SELECT_INTERVAL_MS);
+            }
+            this.log.info('The remembered tOS Jupyter kernel is not available; asking for the kernel once.');
+        }
+        // 처음 한 번: Jupyter 확장의 tOS Remote 커널 목록(추천 커널 표시)에서 고르게 하고 그 커널을 기억한다
+        const selected = await this.pickBoardKernel(notebook);
+        if (!selected) {
+            return;
+        }
+        await state.update(KERNEL_IDS_KEY, { ...ids, [board]: baseControllerId(selected) });
+        if (this.isActiveNotebook(notebook)) {
+            await vscode.commands.executeCommand('notebook.selectKernel', { id: selected, extension: JUPYTER_EXTENSION_ID });
+        }
+        this.log.info(`Remembered the tOS Jupyter kernel for ${board}`);
+    }
+
+    /**
+     * Jupyter 확장의 "tOS Remote" 서버 선택 흐름을 실행한다 (서버가 하나뿐이라 커널 목록만 표시된다).
+     * @returns {Promise<string|undefined>} 고른 컨트롤러 ID
+     */
+    async pickBoardKernel(notebook) {
+        const extensionId = this.sessionMgr.context.extension.id;
+        for (const id of [extensionId, extensionId.toLowerCase()]) {
+            // 서버 모음 등록 직후에는 Jupyter 확장이 명령을 연결할 때까지 잠깐 걸린다
+            for (let attempt = 0; attempt < 3; attempt++) {
+                let selected;
+                try {
+                    selected = await vscode.commands.executeCommand('jupyter.kernel.selectJupyterServerKernel', id, COLLECTION_ID, notebook);
+                } catch (error) {
+                    // 사용자가 취소했거나 이 Jupyter 확장 버전에 명령이 없다
+                    this.log.info(`tOS Jupyter kernel was not selected: ${error.message}`);
+                    return undefined;
+                }
+                if (typeof selected === 'string' && selected) {
+                    return selected;
+                }
+                await sleep(300);
+            }
+        }
+        return undefined;
     }
 
     dispose() {

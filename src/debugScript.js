@@ -17,7 +17,7 @@ function buildDebugScript({ remoteWorkspace, pythonCommand, relativePath, port }
         'pkill -u "$(id -u)" -f debugpy 2>/dev/null',
         `listening() { grep -qiE ":${hexPort} [0-9A-F]+:0000 0A" /proc/net/tcp /proc/net/tcp6 2>/dev/null; }`,
         'i=0; while listening && [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done',
-        `${pythonCommand} -u -Xfrozen_modules=off -m debugpy --listen 0.0.0.0:${port} --wait-for-client ${shellQuote(relativePath)} &`,
+        `${pythonCommand} -u -Xfrozen_modules=off -m debugpy --listen 127.0.0.1:${port} --wait-for-client ${shellQuote(relativePath)} &`,
         'P=$!',
         'i=0',
         'while [ $i -lt 200 ]; do',

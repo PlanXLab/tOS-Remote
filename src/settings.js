@@ -8,7 +8,7 @@ const { t } = require('./i18n');
 const SECTION = 'tosRemote';
 
 // 사이드바 패널에서 편집 가능한 항목
-const EDITABLE_KEYS = ['host', 'port', 'user', 'remoteWorkspace', 'driveLetter'];
+const EDITABLE_KEYS = ['host', 'port', 'user', 'remoteWorkspace', 'driveLetter', 'localWorkspace'];
 
 function getSettings() {
     const config = vscode.workspace.getConfiguration(SECTION);
@@ -24,6 +24,7 @@ function getSettings() {
         workspaceError: workspace.error,
         remoteWorkspace: user && workspace.folder ? workspacePathOf(user, workspace.folder) : '',
         driveLetter: normalizeDriveLetter(config.get('driveLetter')),
+        localWorkspace: expandHome(config.get('localWorkspace')),
         identityFile: expandHome(config.get('identityFile')),
         pythonCommand: String(config.get('pythonCommand') || 'python3').trim() || 'python3',
         debugPort: Number(config.get('debugPort')) || 5678,
@@ -80,6 +81,8 @@ async function updateSetting(key, value) {
         if (value && !normalized) {
             throw new Error(t('The drive letter must be one of D to Z.'));
         }
+    } else if (key === 'localWorkspace') {
+        normalized = String(value || '').trim();
     } else if (key === 'remoteWorkspace') {
         const user = getSettings().user;
         const workspace = normalizeWorkspaceFolder(value, user);

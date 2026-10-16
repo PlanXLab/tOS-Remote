@@ -68,11 +68,10 @@ async function run() {
             await vscode.commands.executeCommand('tosRemote.panel.focus');
         });
 
-        await step('사전 점검 (WinFsp, ssh)', async () => {
+        await step('사전 점검 (ssh)', async () => {
             const state = await api.prereq.refresh();
-            assert.ok(state.winfsp, 'WinFsp not found');
             assert.ok(state.ssh, 'ssh.exe not found');
-            return `WinFsp=${state.winfsp}`;
+            return `ssh=${state.ssh}`;
         });
 
         await step('rclone 내려받기·검증·설치', async () => {
@@ -85,6 +84,7 @@ async function run() {
 
         await step('테스트 SFTP 서버 시작', async () => startServer());
 
+        const testLocalDir = path.join(path.dirname(serveDir), 'local-workspace');
         const config = vscode.workspace.getConfiguration('tosRemote');
         await config.update('host', '127.0.0.1', vscode.ConfigurationTarget.Global);
         await config.update('port', port, vscode.ConfigurationTarget.Global);
@@ -101,9 +101,10 @@ async function run() {
             await config.update('remoteWorkspace', '../x', vscode.ConfigurationTarget.Global);
             assert.ok(validateSettings(getSettings()), 'invalid workspace must not validate');
             await updateSetting('remoteWorkspace', 'Workspace');
+            await updateSetting('localWorkspace', testLocalDir);
             const s = getSettings();
-            assert.deepStrictEqual([s.workspaceFolder, s.remoteWorkspace], ['Workspace', '/home/tos/Workspace']);
-            return `${s.workspaceFolder} → ${s.remoteWorkspace}`;
+            assert.deepStrictEqual([s.workspaceFolder, s.remoteWorkspace, s.localWorkspace], ['Workspace', '/home/tos/Workspace', testLocalDir]);
+            return `${s.workspaceFolder} → ${s.remoteWorkspace} (local: ${s.localWorkspace})`;
         });
         const target = targetOf(getSettings());
 
@@ -115,51 +116,51 @@ async function run() {
             await api.auth.storePassword(target, 'secret');
         });
 
-        const session = await step('연결 (데몬·없는 작업 공간 생성·마운트·작업 공간 파일)', async () => {
+        const session = await step('연결 (데몬·없는 작업 공간 생성·로컬 동기화·작업 공간 파일)', async () => {
             assert.ok(!fs.existsSync(path.join(serveDir, 'home')), 'serve dir must start empty');
             const s = await api.sessionMgr.connect(getSettings(), undefined, { report() {} }, { interactive: false });
             assert.strictEqual(s.authType, 'password');
             assert.strictEqual(s.remoteWorkspace, '/home/tos/Workspace');
             assert.ok(fs.existsSync(path.join(serveDir, 'home', 'tos', 'Workspace')), 'remote workspace not created');
-            assert.ok(fs.existsSync(`${s.drive}\\`), 'drive not mounted');
+            assert.ok(fs.existsSync(s.localWorkspace), 'local workspace folder not created');
             const ws = JSON.parse(fs.readFileSync(api.sessionMgr.workspaceFile, 'utf8'));
-            assert.strictEqual(ws.folders[0].path, `${s.drive}/`);
-            return `drive=${s.drive}`;
+            assert.strictEqual(ws.folders[0].path, s.localWorkspace.replace(/\\/g, '/'));
+            return `local=${s.localWorkspace}`;
         }).then(() => api.sessionMgr.readSession());
 
-        await step('드라이브에 쓰기 → 업로드 완료 대기 → SFTP 쪽 반영 (10회 반복)', async () => {
-            fs.mkdirSync(`${session.drive}\\vision`, { recursive: true });
+        await step('로컬에 쓰기 → 업로드 완료 대기 → SFTP 쪽 반영 (10회 반복)', async () => {
+            const localVision = path.join(session.localWorkspace, 'vision');
+            fs.mkdirSync(localVision, { recursive: true });
             const remote = path.join(serveDir, 'home', 'tos', 'Workspace', 'vision', 'infer.py');
             const times = [];
             for (let i = 0; i < 10; i++) {
                 const content = `print("hello ${i}")\n`;
-                fs.writeFileSync(`${session.drive}\\vision\\infer.py`, content);
+                fs.writeFileSync(path.join(localVision, 'infer.py'), content);
                 const start = Date.now();
                 const flushed = await api.sessionMgr.waitForUploads(20000);
                 times.push(Date.now() - start);
                 assert.ok(flushed, 'uploads not flushed');
                 assert.strictEqual(fs.readFileSync(remote, 'utf8'), content, `iteration ${i}`);
             }
-            fs.writeFileSync(`${session.drive}\\vision\\infer.py`, 'print("hello")\n');
+            fs.writeFileSync(path.join(localVision, 'infer.py'), 'print("hello")\n');
             assert.ok(await api.sessionMgr.waitForUploads(20000));
             return `wait ms: ${times.join(', ')}`;
         });
 
-        await step('SFTP 쪽 변경 → 드라이브 새로 고침 후 표시', async () => {
+        await step('SFTP 쪽 변경 → 보드에서 가져오기 후 표시', async () => {
             fs.writeFileSync(path.join(serveDir, 'home', 'tos', 'Workspace', 'from_board.txt'), 'x');
-            await api.rclone.refresh();
-            assert.ok(fs.existsSync(`${session.drive}\\from_board.txt`));
+            await api.sessionMgr.refreshDrive();
+            assert.ok(fs.existsSync(path.join(session.localWorkspace, 'from_board.txt')));
         });
 
         await step('경로 매핑 (터미널 링크·디버그)', async () => {
             const mappings = api.sessionMgr.getPathMappings();
-            assert.deepStrictEqual(mappings[0], { remote: '/home/tos/Workspace', local: `${session.drive}\\` });
+            assert.deepStrictEqual(mappings[0], { remote: '/home/tos/Workspace', local: path.normalize(session.localWorkspace) });
         });
 
-        await step('같은 설정으로 다시 연결 시 기존 마운트 재사용', async () => {
+        await step('같은 설정으로 다시 연결 시 기존 로컬 작업 공간 재사용', async () => {
             const s = await api.sessionMgr.connect(getSettings(), api.sessionMgr.readSession(), { report() {} }, { interactive: false, quick: true });
-            assert.strictEqual(s.drive, session.drive);
-            assert.strictEqual((await api.rclone.listMounts()).length, 1);
+            assert.strictEqual(s.localWorkspace, session.localWorkspace);
         });
 
         await step('라이브러리 동기화: 필수 실패만 알림, 선택(없음·가상 환경)은 알림 없음', async () => {
@@ -210,7 +211,7 @@ async function run() {
             return `${elapsed}ms, phase=${status.phase}`;
         });
 
-        await step('rclone 데몬 강제 종료 → 자동 복구(같은 드라이브로 재마운트)', async () => {
+        await step('rclone 데몬 강제 종료 → 자동 복구', async () => {
             const oldPid = api.rclone.readState().pid;
             process.kill(oldPid);
             await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -218,15 +219,13 @@ async function run() {
             await api.sessionMgr.recover(api.sessionMgr.readSession(), false);
             const state = api.rclone.readState();
             assert.notStrictEqual(state.pid, oldPid);
-            assert.ok(await api.rclone.isMounted(session.drive), 'not remounted');
-            assert.strictEqual(fs.readFileSync(`${session.drive}\\vision\\infer.py`, 'utf8'), 'print("hello")\n');
+            assert.strictEqual(fs.readFileSync(path.join(session.localWorkspace, 'vision', 'infer.py'), 'utf8'), 'print("hello")\n');
             return `pid ${oldPid} → ${state.pid}`;
         });
 
-        await step('닫기 (업로드 확인·마운트 해제·데몬 종료)', async () => {
+        await step('닫기 (업로드 확인·데몬 종료)', async () => {
             const pid = api.rclone.readState().pid;
             await api.sessionMgr.finishClose();
-            assert.ok(!fs.existsSync(`${session.drive}\\`), 'drive still mounted');
             assert.strictEqual(api.rclone.readState(), undefined);
             assert.strictEqual(api.sessionMgr.readSession(), undefined);
             assert.ok(!isProcessAlive(pid), 'daemon still alive');
@@ -238,20 +237,13 @@ async function run() {
             fs.writeFileSync(path.join(path.dirname(out), 'daemon-pid.txt'), String(state.pid));
             fs.writeFileSync(path.join(path.dirname(out), 'workspace-file.txt'), api.sessionMgr.workspaceFile);
             keepDaemon = true;
-            return `pid=${state.pid}, drive=${s.drive}`;
+            return `pid=${state.pid}, local=${s.localWorkspace}`;
         });
     } finally {
         if (server) {
             server.kill();
         }
         if (api && !keepDaemon) {
-            try {
-                for (const m of await api.rclone.listMounts()) {
-                    await api.rclone.unmount(m.MountPoint);
-                }
-            } catch {
-                // 데몬 없음
-            }
             await api.rclone.quitDaemon().catch(() => {});
         }
     }
@@ -277,7 +269,7 @@ async function runPhaseKo() {
         };
         assert.strictEqual(title('tosRemote.runFile'), 'tOS에서 실행');
         assert.strictEqual(title('tosRemote.debugFile'), 'tOS에서 디버그');
-        assert.strictEqual(ext.packageJSON.contributes.walkthroughs[0].steps[0].media.markdown, 'media/walkthrough/ko/winfsp.md');
+        assert.strictEqual(ext.packageJSON.contributes.walkthroughs[0].steps[0].media.markdown, 'media/walkthrough/ko/rclone.md');
         return `${title('tosRemote.runFile')} / ${title('tosRemote.debugFile')}`;
     });
     await step('[ko] 런타임 문자열(l10n bundle) 번역', async () => {
@@ -326,7 +318,7 @@ async function runPhase2() {
         const folder = vscode.workspace.workspaceFolders[0];
 
         await step('[2단계] 작업 공간 설정 (폴더·터미널·launch·Pylance)', async () => {
-            assert.strictEqual(folder.uri.fsPath.toUpperCase(), `${session.drive}\\`.toUpperCase());
+            assert.strictEqual(folder.uri.fsPath.toUpperCase(), path.normalize(session.localWorkspace).toUpperCase());
             const terminal = vscode.workspace.getConfiguration('terminal.integrated');
             const profileName = terminal.get('defaultProfile.windows');
             assert.strictEqual(profileName, 'tOS SSH');
@@ -341,8 +333,10 @@ async function runPhase2() {
             return `folder=${folder.uri.fsPath}`;
         });
 
+        const inferFile = path.join(session.localWorkspace, 'vision', 'infer.py');
+
         await step('[2단계] 실행 대상 경로 변환', async () => {
-            const target = api.runner.resolveTarget(vscode.Uri.file(`${session.drive}\\vision\\infer.py`));
+            const target = api.runner.resolveTarget(vscode.Uri.file(inferFile));
             assert.strictEqual(target.relativePath, 'vision/infer.py');
             assert.throws(() => api.runner.resolveTarget(vscode.Uri.file('C:\\Windows\\win.ini')));
         });
@@ -362,7 +356,7 @@ async function runPhase2() {
             await provider.handleTerminalLink(links[0]);
             const editor = vscode.window.activeTextEditor;
             assert.ok(editor, 'no editor opened');
-            assert.strictEqual(editor.document.uri.fsPath.toUpperCase(), `${session.drive}\\vision\\infer.py`.toUpperCase());
+            assert.strictEqual(editor.document.uri.fsPath.toUpperCase(), inferFile.toUpperCase());
             assert.strictEqual(editor.selection.active.line, 0);
         });
 
@@ -382,7 +376,7 @@ async function runPhase2() {
         };
 
         await step('[2단계] Ctrl+F5 (workbench.action.debug.run) → 보드 실행 작업', async () => {
-            const uri = vscode.Uri.file(`${session.drive}\\vision\\infer.py`);
+            const uri = vscode.Uri.file(inferFile);
             await vscode.window.showTextDocument(uri);
             await vscode.commands.executeCommand('workbench.action.debug.run');
             const name = await waitRunTask();
@@ -399,18 +393,18 @@ async function runPhase2() {
         });
 
         await step('[2단계] Run 버튼 메뉴 "Run on tOS" (tosRemote.runFile)', async () => {
-            await vscode.commands.executeCommand('tosRemote.runFile', vscode.Uri.file(`${session.drive}\\vision\\infer.py`));
+            await vscode.commands.executeCommand('tosRemote.runFile', vscode.Uri.file(inferFile));
             assert.strictEqual(await waitRunTask(), 'Run on tOS: vision/infer.py');
         });
 
         await step('[2단계] Run 버튼 메뉴 "Debug on tOS" → Python Debugger 확장이 없으면 시작하지 않음', async () => {
-            const started = await vscode.commands.executeCommand('tosRemote.debugFile', vscode.Uri.file(`${session.drive}\\vision\\infer.py`));
+            const started = await vscode.commands.executeCommand('tosRemote.debugFile', vscode.Uri.file(inferFile));
             assert.strictEqual(started, false);
             assert.strictEqual(vscode.debug.activeDebugSession, undefined);
         });
 
         await step('[2단계] F5(디버그) → Python Debugger 확장이 없으면 시작하지 않음', async () => {
-            const started = await vscode.debug.startDebugging(folder, { type: 'tos-remote', request: 'launch', name: 'it', program: `${session.drive}\\vision\\infer.py` });
+            const started = await vscode.debug.startDebugging(folder, { type: 'tos-remote', request: 'launch', name: 'it', program: inferFile });
             assert.strictEqual(started, false);
             assert.strictEqual(vscode.debug.activeDebugSession, undefined);
         });
@@ -424,7 +418,7 @@ async function runPhase2() {
             assert.strictEqual(api.jupyter.status().phase, 'stopped');
         });
 
-        await step('[2단계] 닫기 마무리 (마운트 해제·데몬 종료)', async () => {
+        await step('[2단계] 닫기 마무리 (데몬 종료)', async () => {
             await vscode.commands.executeCommand('workbench.action.closeAllEditors');
             await api.sessionMgr.finishClose();
             assert.strictEqual(api.rclone.readState(), undefined);

@@ -1,5 +1,6 @@
 'use strict';
 
+const path = require('path');
 const vscode = require('vscode');
 const { t } = require('./i18n');
 
@@ -11,7 +12,7 @@ function phases() {
         closing: { icon: '$(sync~spin)', text: t('tOS: Closing'), tooltip: t('Closing the remote workspace.') },
         open: { icon: '$(remote)', text: 'tOS', tooltip: t('The remote workspace is open.'), active: true },
         elsewhere: { icon: '$(remote)', text: t('tOS: Other Window'), tooltip: t('The remote workspace is open in another window.') },
-        detached: { icon: '$(remote)', text: t('tOS: Mounted'), tooltip: t('The drive is mounted, but no workspace window is open.') }
+        detached: { icon: '$(remote)', text: t('tOS: Detached'), tooltip: t('The remote workspace window is closed.') }
     };
 }
 
@@ -39,7 +40,8 @@ class StatusBar {
         const session = status.session;
         let text = phase.text;
         if (status.phase === 'open' && session) {
-            text = `tOS: ${session.drive} ${session.host}`;
+            const loc = session.localWorkspace ? path.basename(session.localWorkspace) : (session.drive || '');
+            text = `tOS: ${loc} ${session.host}`;
         }
         if (status.pendingUploads > 0) {
             text += ` $(cloud-upload) ${status.pendingUploads}`;
@@ -48,7 +50,8 @@ class StatusBar {
             text += this.jupyter === 'running' ? ' $(notebook)' : ' $(sync~spin)';
         }
         this.item.text = `${phase.icon} ${text}`;
-        const details = session ? `\n\n${session.user}@${session.host}\n${session.remoteWorkspace} → ${session.drive}` : '';
+        const loc = session ? (session.localWorkspace || session.drive || '') : '';
+        const details = session ? `\n\n${session.user}@${session.host}\n${session.remoteWorkspace} → ${loc}` : '';
         const jupyter = status.phase === 'open' && this.jupyter === 'running' ? `\n${t('Jupyter: running on the board')}` : '';
         this.item.tooltip = `${phase.tooltip}${details}${jupyter}`;
         this.item.backgroundColor = phase.warning

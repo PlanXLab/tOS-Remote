@@ -410,7 +410,6 @@ class BoardTools {
             .then((result) => {
                 if (result.code !== 0) {
                     this.log.warn(`pip check reported problems:\n${result.stdout.trim()}`);
-                    vscode.window.showWarningMessage(t('Some Python packages on the board have unmet dependencies. See the log for details.'));
                 }
             })
             .catch((error) => this.log.debug(`pip check failed: ${error.message}`));

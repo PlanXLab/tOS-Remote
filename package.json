@@ -2,7 +2,7 @@
     "name": "tos-remote",
     "displayName": "%displayName%",
     "description": "%description%",
-    "version": "0.3.0",
+    "version": "0.5.2",
     "publisher": "PlanXLab",
     "license": "GPL-3.0-or-later",
     "icon": "media/icon.png",
@@ -52,9 +52,7 @@
         }
     },
     "scripts": {
-        "test": "node test/run.js",
-        "package": "npx --yes @vscode/vsce package --out dist/",
-        "publish": "npx --yes @vscode/vsce publish"
+        "test": "node test/run.js"
     },
     "contributes": {
         "configuration": {
@@ -90,26 +88,33 @@
                     "order": 4,
                     "markdownDescription": "%config.remoteWorkspace%"
                 },
+                "tosRemote.localWorkspace": {
+                    "type": "string",
+                    "default": "",
+                    "scope": "machine",
+                    "order": 5,
+                    "markdownDescription": "%config.localWorkspace%"
+                },
                 "tosRemote.driveLetter": {
                     "type": "string",
                     "default": "",
                     "pattern": "^([D-Zd-z]:?)?$",
                     "scope": "machine",
-                    "order": 5,
+                    "order": 6,
                     "markdownDescription": "%config.driveLetter%"
                 },
                 "tosRemote.identityFile": {
                     "type": "string",
                     "default": "",
                     "scope": "machine",
-                    "order": 6,
+                    "order": 7,
                     "markdownDescription": "%config.identityFile%"
                 },
                 "tosRemote.pythonCommand": {
                     "type": "string",
                     "default": "python3",
                     "scope": "machine",
-                    "order": 7,
+                    "order": 8,
                     "description": "%config.pythonCommand%"
                 },
                 "tosRemote.debugPort": {
@@ -118,7 +123,7 @@
                     "minimum": 1024,
                     "maximum": 65535,
                     "scope": "machine",
-                    "order": 8,
+                    "order": 9,
                     "description": "%config.debugPort%"
                 },
                 "tosRemote.pythonLibraryPaths": {
@@ -128,14 +133,14 @@
                     },
                     "default": [],
                     "scope": "machine",
-                    "order": 9,
+                    "order": 10,
                     "markdownDescription": "%config.pythonLibraryPaths%"
                 },
                 "tosRemote.pathMappings": {
                     "type": "array",
                     "default": [],
                     "scope": "machine",
-                    "order": 10,
+                    "order": 11,
                     "markdownDescription": "%config.pathMappings%",
                     "items": {
                         "type": "object",
@@ -159,15 +164,22 @@
                     "type": "string",
                     "default": "",
                     "scope": "machine",
-                    "order": 11,
+                    "order": 12,
                     "description": "%config.rclonePath%"
                 },
                 "tosRemote.packageExcludeNewer": {
                     "type": "string",
                     "default": "",
                     "scope": "machine",
-                    "order": 12,
+                    "order": 13,
                     "markdownDescription": "%config.packageExcludeNewer%"
+                },
+                "tosRemote.jupyterAutoSelectKernel": {
+                    "type": "boolean",
+                    "default": true,
+                    "scope": "machine",
+                    "order": 14,
+                    "markdownDescription": "%config.jupyterAutoSelectKernel%"
                 }
             }
         },
@@ -229,6 +241,11 @@
                 "category": "tOS"
             },
             {
+                "command": "tosRemote.selectLocalWorkspace",
+                "title": "%command.selectLocalWorkspace%",
+                "category": "tOS"
+            },
+            {
                 "command": "tosRemote.syncPythonLibraries",
                 "title": "%command.syncPythonLibraries%",
                 "category": "tOS"
@@ -265,11 +282,6 @@
             {
                 "command": "tosRemote.installRclone",
                 "title": "%command.installRclone%",
-                "category": "tOS"
-            },
-            {
-                "command": "tosRemote.installWinFsp",
-                "title": "%command.installWinFsp%",
                 "category": "tOS"
             },
             {
@@ -463,17 +475,6 @@
                 "description": "%walkthrough.description%",
                 "steps": [
                     {
-                        "id": "winfsp",
-                        "title": "%walkthrough.winfsp.title%",
-                        "description": "%walkthrough.winfsp.description%",
-                        "media": {
-                            "markdown": "%walkthrough.winfsp.media%"
-                        },
-                        "completionEvents": [
-                            "onContext:tosRemote.winfspReady"
-                        ]
-                    },
-                    {
                         "id": "rclone",
                         "title": "%walkthrough.rclone.title%",
                         "description": "%walkthrough.rclone.description%",
@@ -492,7 +493,7 @@
                             "markdown": "%walkthrough.board.media%"
                         },
                         "completionEvents": [
-                            "onContext:tosRemote.connectionTested"
+                            "onContext:tosRemote.boardConnected"
                         ]
                     },
                     {
@@ -514,7 +515,7 @@
                             "markdown": "%walkthrough.open.media%"
                         },
                         "completionEvents": [
-                            "onCommand:tosRemote.openWorkspace"
+                            "onContext:tosRemote.workspaceOpened"
                         ]
                     }
                 ]

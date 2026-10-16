@@ -5,7 +5,6 @@ const os = require('os');
 const path = require('path');
 const https = require('https');
 const crypto = require('crypto');
-const { execFile } = require('child_process');
 const { runProcess, noopLogger } = require('./util');
 const { t } = require('./i18n');
 
@@ -233,28 +232,4 @@ async function installUv(options) {
     }
 }
 
-function queryRegistry(key, value) {
-    return new Promise((resolve) => {
-        execFile('reg.exe', ['query', key, '/v', value], { windowsHide: true }, (error, stdout) => {
-            if (error) {
-                resolve(undefined);
-                return;
-            }
-            const match = new RegExp(`${value}\\s+REG_\\w+\\s+(.+)`).exec(stdout || '');
-            resolve(match ? match[1].trim() : undefined);
-        });
-    });
-}
-
-/** @returns {Promise<string|undefined>} WinFsp 설치 경로 */
-async function findWinFsp() {
-    for (const key of ['HKLM\\SOFTWARE\\WOW6432Node\\WinFsp', 'HKLM\\SOFTWARE\\WinFsp']) {
-        const dir = await queryRegistry(key, 'InstallDir');
-        if (dir && fs.existsSync(path.join(dir, 'bin'))) {
-            return dir;
-        }
-    }
-    return undefined;
-}
-
-module.exports = { installRclone, getLatestRcloneVersion, findWinFsp, rcloneArch, installUv, getUvVersion, downloadFile };
+module.exports = { installRclone, getLatestRcloneVersion, rcloneArch, installUv, getUvVersion, downloadFile };
